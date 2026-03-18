@@ -104,6 +104,12 @@ pub enum Command {
 
     /// Check credentials, auth, and integration status
     Doctor,
+
+    /// Open browser to connect an integration
+    Connect {
+        /// Integration name (e.g., google-analytics, klaviyo, reddit-ads)
+        integration: String,
+    },
 }
 
 fn main() {

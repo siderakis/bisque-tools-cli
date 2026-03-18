@@ -117,6 +117,21 @@ bisque doctor
 This validates credentials, tests API auth, lists connected vs. available
 integrations, and flags stale generated skill directories.
 
+### 6. Connect new integrations
+
+If the task at hand would benefit from an integration the user hasn't
+connected yet, check the "Available integrations" section at the bottom of
+this file (added automatically by `bisque sync`).
+
+To connect a new integration, run:
+
+```bash
+bisque connect <integration-name>
+```
+
+This opens the browser to the OAuth/setup page. After the user completes
+setup, run `bisque sync` to pull in the new tools.
+
 ## Guidelines
 
 - Always run `tools` or `sync` first before calling anything. Do not guess tool names.
@@ -130,3 +145,5 @@ integrations, and flags stale generated skill directories.
   integration state, then retry.
 - Prefer `--raw` when you are parsing the output programmatically to avoid
   extra whitespace.
+- If a task could benefit from an unconnected integration, proactively
+  suggest it to the user and offer to run `bisque connect <name>`.

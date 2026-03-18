@@ -93,6 +93,9 @@ pub fn run(cli: Cli) -> Result<()> {
             agent.as_deref(),
             skills_dir.as_deref(),
         ),
+        Command::Connect { integration } => {
+            cmd_connect(&cli, profile.as_ref(), integration)
+        }
     }
 }
 
@@ -622,6 +625,9 @@ fn run_sync_inner(client: &ApiClient, skills_root: &Path) -> Result<()> {
         }
     }
 
+    // Update core SKILL.md with unconnected integrations discovery section
+    update_core_skill_with_discovery(&result, &bisque_api_dir)?;
+
     // Summary
     eprintln!("Synced {} integration(s):", groups.len());
     for name in &added {
@@ -637,6 +643,98 @@ fn run_sync_inner(client: &ApiClient, skills_root: &Path) -> Result<()> {
         eprintln!("  (no changes)");
     }
 
+    Ok(())
+}
+
+/// Reads the core SKILL.md template and appends a section listing
+/// unconnected integrations with `bisque connect` commands.
+fn update_core_skill_with_discovery(
+    bootstrap: &Value,
+    bisque_api_dir: &Path,
+) -> Result<()> {
+    let skill_md_path = bisque_api_dir.join("SKILL.md");
+    if !skill_md_path.exists() {
+        return Ok(());
+    }
+
+    let status = match bootstrap
+        .get("integrationStatus")
+        .and_then(|v| v.as_object())
+    {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    // Integrations that are not agent-connectable (skip them)
+    let skip = [
+        "google",
+        "imessage",
+        "weather",
+    ];
+
+    let mut unconnected: Vec<(String, String)> = Vec::new();
+    for (key, value) in status {
+        if skip.contains(&key.as_str()) {
+            continue;
+        }
+        let connected = value
+            .get("connected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !connected {
+            let slug = integration_slug(key);
+            let label = integration_label(key).to_string();
+            unconnected.push((slug, label));
+        }
+    }
+
+    unconnected.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Read existing SKILL.md
+    let mut content =
+        fs::read_to_string(&skill_md_path).unwrap_or_default();
+
+    // Remove any previous discovery section
+    if let Some(pos) =
+        content.find("\n## Available integrations (not connected)")
+    {
+        content.truncate(pos);
+    }
+
+    // Append discovery section if there are unconnected integrations
+    if !unconnected.is_empty() {
+        content.push_str(
+            "\n## Available integrations (not connected)\n\n",
+        );
+        content.push_str(
+            "The following integrations are available but the user hasn't connected them yet.\n",
+        );
+        content.push_str(
+            "If any of these would help with the current task, let the user know and offer to\n",
+        );
+        content.push_str(
+            "open the setup page:\n\n",
+        );
+        content.push_str(
+            "| Integration | Connect command |\n",
+        );
+        content.push_str(
+            "|-------------|----------------|\n",
+        );
+        for (slug, label) in &unconnected {
+            content.push_str(&format!(
+                "| {label} | `bisque connect {slug}` |\n"
+            ));
+        }
+        content.push_str(
+            "\nRunning `bisque connect <name>` opens the browser to the OAuth/setup page.\n",
+        );
+        content.push_str(
+            "After the user completes setup, run `bisque sync` to pull in the new tools.\n",
+        );
+    }
+
+    fs::write(&skill_md_path, content)?;
     Ok(())
 }
 
@@ -741,7 +839,11 @@ fn cmd_doctor(
         if !disconnected.is_empty() {
             println!("  Available (not connected):");
             for name in &disconnected {
-                println!("    - {name} (connect at bisque.tools)");
+                let slug = integration_slug(name);
+                println!(
+                    "    - {} (bisque connect {slug})",
+                    integration_label(name)
+                );
             }
         }
     }
@@ -784,6 +886,110 @@ fn cmd_doctor(
         }
     );
     std::process::exit(if ok { 0 } else { 1 });
+}
+
+// ─── Connect ────────────────────────────────────────────────────────
+
+/// Maps integration status keys to web UI URL paths.
+fn integration_url_path(integration: &str) -> Option<&'static str> {
+    match integration {
+        "google" | "gmail" | "google-calendar" | "googleCalendar"
+        | "google-analytics" | "googleAnalytics"
+        | "google-search-console" | "googleSearchConsole"
+        | "google-tag-manager" | "googleTagManager"
+        | "google-sheets" | "googleSheets" => {
+            Some("/integrations/google")
+        }
+        "tesla" => Some("/integrations/tesla"),
+        "stripe" => Some("/integrations/stripe"),
+        "mailchimp" => Some("/integrations/mailchimp"),
+        "klaviyo" => Some("/integrations/klaviyo"),
+        "x" => Some("/integrations/x"),
+        "meta-ads" | "metaAds" => Some("/integrations/meta-ads"),
+        "reddit-ads" | "redditAds" => {
+            Some("/integrations/reddit-ads")
+        }
+        _ => None,
+    }
+}
+
+/// Human-readable label for an integration status key.
+fn integration_label(key: &str) -> &str {
+    match key {
+        "google" => "Google",
+        "gmail" => "Gmail",
+        "googleCalendar" => "Google Calendar",
+        "tesla" => "Tesla",
+        "imessage" => "iMessage",
+        "weather" => "Weather",
+        "stripe" => "Stripe",
+        "mailchimp" => "Mailchimp",
+        "klaviyo" => "Klaviyo",
+        "x" => "X (Twitter)",
+        "ahrefs" => "Ahrefs",
+        "metaAds" => "Meta Ads",
+        "redditAds" => "Reddit Ads",
+        "googleAnalytics" => "Google Analytics",
+        "googleSearchConsole" => "Google Search Console",
+        "googleTagManager" => "Google Tag Manager",
+        "googleSheets" => "Google Sheets",
+        "firestore" => "Firestore",
+        _ => key,
+    }
+}
+
+/// Slug form for CLI usage (e.g., "googleAnalytics" → "google-analytics").
+fn integration_slug(key: &str) -> String {
+    // Convert camelCase to kebab-case
+    let mut result = String::new();
+    for (i, ch) in key.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            result.push('-');
+            result.push(ch.to_lowercase().next().unwrap());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn cmd_connect(
+    cli: &Cli,
+    profile: Option<&BisqueProfile>,
+    integration: &str,
+) -> Result<()> {
+    let env_base_url = std::env::var("BISQUE_BASE_URL").ok();
+    let base_url = cli
+        .base_url
+        .as_deref()
+        .or(env_base_url.as_deref())
+        .or(profile.and_then(|p| p.base_url.as_deref()))
+        .unwrap_or(crate::DEFAULT_BASE_URL)
+        .trim_end_matches('/');
+
+    let path = match integration_url_path(integration) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "Unknown integration: \"{integration}\"\n"
+            );
+            eprintln!("Available integrations:");
+            eprintln!("  google, klaviyo, mailchimp, meta-ads,");
+            eprintln!("  reddit-ads, stripe, tesla, x");
+            eprintln!(
+                "\nGoogle sub-services (google-analytics, google-calendar, etc.)"
+            );
+            eprintln!(
+                "all connect through the Google integration page."
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let url = format!("{base_url}{path}");
+    eprintln!("Opening {url}");
+    open::that(&url).context("Failed to open browser")?;
+    Ok(())
 }
 
 // ─── Sync helpers ───────────────────────────────────────────────────
