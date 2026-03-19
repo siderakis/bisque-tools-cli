@@ -96,6 +96,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Connect { integration } => {
             cmd_connect(&cli, profile.as_ref(), integration)
         }
+        Command::Update => cmd_update(),
     }
 }
 
@@ -1308,4 +1309,148 @@ fn mask_str(value: Option<&str>, visible: usize) -> String {
         }
         _ => "(not set)".to_string(),
     }
+}
+
+// ─── Update ─────────────────────────────────────────────────────────
+
+const UPDATE_REPO: &str = "siderakis/bisque-tools-cli";
+
+fn cmd_update() -> Result<()> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    eprintln!("Current version: v{current_version}");
+    eprintln!("Checking for updates...");
+
+    // Fetch latest release
+    let url = format!(
+        "https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+    );
+    let resp = ureq::get(&url)
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", "bisque-cli")
+        .call()
+        .context("Failed to check for updates")?;
+
+    let body: Value = serde_json::from_str(
+        &resp.into_string().context("Failed to read response")?,
+    )?;
+
+    let tag = body
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .context("Missing tag_name in release")?;
+
+    let latest_version = tag.trim_start_matches('v');
+
+    if latest_version == current_version {
+        eprintln!("Already up to date (v{current_version}).");
+        return Ok(());
+    }
+
+    eprintln!("Updating v{current_version} → v{latest_version}...");
+
+    // Detect platform
+    let target = detect_target()?;
+    let asset_name = format!("bisque-{target}.tar.gz");
+
+    // Find download URL from release assets
+    let download_url = body
+        .get("assets")
+        .and_then(|v| v.as_array())
+        .and_then(|assets| {
+            assets.iter().find_map(|a| {
+                let name = a.get("name")?.as_str()?;
+                if name == asset_name {
+                    a.get("browser_download_url")
+                        .and_then(|u| u.as_str())
+                        .map(String::from)
+                } else {
+                    None
+                }
+            })
+        })
+        .with_context(|| {
+            format!("No release asset found for {asset_name}")
+        })?;
+
+    // Download to temp file
+    let dl_resp = ureq::get(&download_url)
+        .call()
+        .context("Failed to download update")?;
+
+    let mut tarball = Vec::new();
+    dl_resp
+        .into_reader()
+        .read_to_end(&mut tarball)
+        .context("Failed to read download")?;
+
+    // Extract binary from tarball
+    let decoder = flate2::read::GzDecoder::new(&tarball[..]);
+    let mut archive = tar::Archive::new(decoder);
+    let current_exe = std::env::current_exe()
+        .context("Failed to determine current executable path")?;
+
+    let tmp_path = current_exe.with_extension("tmp");
+
+    let mut found = false;
+    for entry in archive.entries().context("Failed to read archive")? {
+        let mut entry = entry.context("Failed to read archive entry")?;
+        let path = entry
+            .path()
+            .context("Failed to read entry path")?
+            .to_path_buf();
+        if path.file_name().and_then(|n| n.to_str()) == Some("bisque")
+        {
+            let mut file = fs::File::create(&tmp_path)
+                .context("Failed to create temp file")?;
+            io::copy(&mut entry, &mut file)
+                .context("Failed to write binary")?;
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        // Clean up temp file
+        let _ = fs::remove_file(&tmp_path);
+        bail!("Archive does not contain a 'bisque' binary");
+    }
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            &tmp_path,
+            fs::Permissions::from_mode(0o755),
+        )
+        .context("Failed to set permissions")?;
+    }
+
+    // Atomic swap
+    fs::rename(&tmp_path, &current_exe).context(
+        "Failed to replace binary. You may need to run with sudo.",
+    )?;
+
+    eprintln!("Updated to v{latest_version}.");
+    Ok(())
+}
+
+fn detect_target() -> Result<String> {
+    let os = if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else if cfg!(target_os = "linux") {
+        "unknown-linux-gnu"
+    } else {
+        bail!("Unsupported OS for self-update")
+    };
+
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        bail!("Unsupported architecture for self-update")
+    };
+
+    Ok(format!("{arch}-{os}"))
 }

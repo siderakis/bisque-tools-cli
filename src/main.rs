@@ -110,6 +110,9 @@ pub enum Command {
         /// Integration name (e.g., google-analytics, klaviyo, reddit-ads)
         integration: String,
     },
+
+    /// Update bisque to the latest version
+    Update,
 }
 
 fn main() {
