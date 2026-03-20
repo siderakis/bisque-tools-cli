@@ -466,7 +466,7 @@ fn cmd_tools(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
             .iter()
             .map(|t| serde_json::to_value(t).unwrap())
             .collect();
-        print_json(&Value::Array(arr), !cli.raw);
+        print_json(&Value::Array(arr), cli.pretty);
     } else {
         for tool in &tools {
             println!("{} — {}", tool.name, tool.description);
@@ -1196,7 +1196,7 @@ Tool call responses are JSON with this shape:
   unless they ask for details.
 - If a tool returns `"denied"`, tell the user the integration may need
   re-authorization at bisque.tools.
-- Prefer `--raw` when parsing output programmatically.
+- Use `--pretty` if you need human-readable JSON output.
 "#,
         label = group.label,
         count = group.tools.len(),
@@ -1246,7 +1246,7 @@ fn print_result(result: &Value, cli: &Cli) {
             });
         match summary {
             Some(s) => println!("{s}"),
-            None => print_json(result, !cli.raw),
+            None => print_json(result, cli.pretty),
         }
         return;
     }
@@ -1257,7 +1257,7 @@ fn print_result(result: &Value, cli: &Cli) {
                 if let Some(s) = value.as_str() {
                     println!("{s}");
                 } else {
-                    print_json(value, !cli.raw);
+                    print_json(value, cli.pretty);
                 }
             }
             None => {
@@ -1268,7 +1268,7 @@ fn print_result(result: &Value, cli: &Cli) {
         return;
     }
 
-    print_json(result, !cli.raw);
+    print_json(result, cli.pretty);
 }
 
 fn get_nested_field<'a>(

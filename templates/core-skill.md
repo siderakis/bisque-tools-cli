@@ -143,7 +143,6 @@ setup, run `bisque sync` to pull in the new tools.
   check their credentials and rotate the key at bisque.tools if needed.
 - If a tool returns `TOOL_NOT_AVAILABLE`, re-run `sync` to refresh
   integration state, then retry.
-- Prefer `--raw` when you are parsing the output programmatically to avoid
-  extra whitespace.
+- Use `--pretty` if you need human-readable JSON output.
 - If a task could benefit from an unconnected integration, proactively
   suggest it to the user and offer to run `bisque connect <name>`.

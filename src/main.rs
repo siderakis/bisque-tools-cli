@@ -34,9 +34,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub api_key: Option<String>,
 
-    /// Compact JSON output
+    /// Pretty-print JSON output (default is compact)
     #[arg(long, global = true)]
-    pub raw: bool,
+    pub pretty: bool,
 
     /// Output as JSON (tools command)
     #[arg(long, global = true)]
