@@ -104,7 +104,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Connect { integration } => {
             cmd_connect(&cli, profile.as_ref(), integration)
         }
-        Command::Update => cmd_update(),
+        Command::Update => cmd_update(&cli, profile.as_ref()),
     }
 }
 
@@ -1366,7 +1366,7 @@ fn mask_str(value: Option<&str>, visible: usize) -> String {
 
 const UPDATE_REPO: &str = "siderakis/bisque-tools-cli";
 
-fn cmd_update() -> Result<()> {
+fn cmd_update(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     let current_version = env!("CARGO_PKG_VERSION");
     eprintln!("Current version: v{current_version}");
     eprintln!("Checking for updates...");
@@ -1483,6 +1483,26 @@ fn cmd_update() -> Result<()> {
     )?;
 
     eprintln!("Updated to v{latest_version}.");
+
+    // Auto-sync skills using the new binary
+    let auth = config::resolve_auth(
+        cli.user_id.as_deref(),
+        cli.api_key.as_deref(),
+        cli.base_url.as_deref(),
+        profile,
+    );
+    if !auth.user_id.is_empty() && !auth.api_key.is_empty() {
+        eprintln!("\nSyncing skills...");
+        let exe = current_exe.to_string_lossy().to_string();
+        let status = std::process::Command::new(&exe)
+            .arg("sync")
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            _ => eprintln!("Sync failed — run `bisque sync` manually."),
+        }
+    }
+
     Ok(())
 }
 
