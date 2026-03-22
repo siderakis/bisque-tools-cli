@@ -164,22 +164,16 @@ fn browser_login(
         .and_then(|v| v.as_str())
         .context("Missing browserUrl in response")?;
 
-    // 2. Show pairing code
-    eprintln!("\nYour pairing code: {pairing_code}\n");
-    eprintln!(
-        "Press Enter to open the browser or visit:\n  {browser_url}\n"
-    );
-    eprintln!("(^C to quit)\n");
-
-    // Wait for Enter
-    let mut line = String::new();
-    io::stdin().lock().read_line(&mut line)?;
-
-    // Open browser (best-effort)
+    // 2. Open browser and show pairing code
     let _ = open::that(browser_url);
 
-    // 3. Poll for approval
-    eprintln!("Waiting for confirmation...");
+    eprintln!();
+    eprintln!("  Pairing code:  {pairing_code}");
+    eprintln!();
+    eprintln!("  If the browser didn't open, visit:");
+    eprintln!("  {browser_url}");
+    eprintln!();
+    eprintln!("  Waiting for confirmation... (^C to quit)");
     let poll_url =
         format!("{base_url}/api/poll-cli-session?t={token}");
     let deadline = std::time::Instant::now()
