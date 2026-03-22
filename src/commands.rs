@@ -449,6 +449,44 @@ fn cmd_init(
     Ok(())
 }
 
+// ─── Toolbox discovery ──────────────────────────────────────────────
+
+/// Fetch connected toolbox IDs from /v1/toolboxes and return a bootstrap
+/// URL that pre-loads all of them.
+fn full_bootstrap_path(client: &ApiClient) -> String {
+    let toolbox_ids = match client.get_json("/v1/toolboxes") {
+        Ok(result) => {
+            let mut ids = Vec::new();
+            if let Some(providers) = result.get("providers").and_then(|v| v.as_array()) {
+                for provider in providers {
+                    let connected = provider
+                        .get("connected")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !connected {
+                        continue;
+                    }
+                    if let Some(toolboxes) = provider.get("toolboxes").and_then(|v| v.as_array()) {
+                        for tb in toolboxes {
+                            if let Some(id) = tb.get("id").and_then(|v| v.as_str()) {
+                                ids.push(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            ids
+        }
+        Err(_) => Vec::new(),
+    };
+
+    if toolbox_ids.is_empty() {
+        "/v1/bootstrap".to_string()
+    } else {
+        format!("/v1/bootstrap?toolboxes={}", toolbox_ids.join(","))
+    }
+}
+
 // ─── Tools ──────────────────────────────────────────────────────────
 
 fn cmd_tools(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
@@ -460,7 +498,8 @@ fn cmd_tools(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     )?;
     let client =
         ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
-    let result = client.get_json("/v1/bootstrap")?;
+    let path = full_bootstrap_path(&client);
+    let result = client.get_json(&path)?;
     let tools = parse_tools(&result);
 
     if cli.json {
@@ -581,7 +620,8 @@ fn run_sync_inner(client: &ApiClient, skills_root: &Path) -> Result<()> {
     eprintln!("Skills root: {}", skills_root.display());
     eprintln!("Bisque API dir: {}\n", bisque_api_dir.display());
 
-    let result = client.get_json("/v1/bootstrap")?;
+    let path = full_bootstrap_path(client);
+    let result = client.get_json(&path)?;
     let tools = parse_tools(&result);
 
     if tools.is_empty() {
@@ -796,7 +836,8 @@ fn cmd_doctor(
         auth.api_key,
     );
 
-    let result = match client.get_json("/v1/bootstrap") {
+    let bootstrap_path = full_bootstrap_path(&client);
+    let result = match client.get_json(&bootstrap_path) {
         Ok(r) => {
             println!("  Auth: OK");
             r
