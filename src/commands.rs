@@ -22,10 +22,18 @@ struct BootstrapTool {
     description: String,
     #[serde(default)]
     parameters: Value,
+    // v0 fields (kept for backwards compat)
     integration_id: Option<String>,
     web_integration_id: Option<String>,
     access: Option<String>,
     safe: Option<bool>,
+    // v1 fields
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    toolbox_id: Option<String>,
+    #[serde(default)]
+    provider_id: Option<String>,
 }
 
 struct IntegrationGroup {
@@ -347,7 +355,7 @@ fn manual_login(
         api_key,
     );
 
-    match client.get_json("/agentBootstrap") {
+    match client.get_json("/v1/bootstrap") {
         Ok(result) => {
             let count = result
                 .get("tools")
@@ -452,7 +460,7 @@ fn cmd_tools(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     )?;
     let client =
         ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
-    let result = client.get_json("/agentBootstrap")?;
+    let result = client.get_json("/v1/bootstrap")?;
     let tools = parse_tools(&result);
 
     if cli.json {
@@ -486,7 +494,7 @@ fn cmd_bootstrap(
     )?;
     let client =
         ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
-    let result = client.get_json("/agentBootstrap")?;
+    let result = client.get_json("/v1/bootstrap")?;
     print_result(&result, cli);
     Ok(())
 }
@@ -532,7 +540,7 @@ fn cmd_call(
         body["invocationId"] = Value::String(id.to_string());
     }
 
-    let result = client.post_json("/agentToolCall", &body)?;
+    let result = client.post_json("/v1/tool-call", &body)?;
     print_result(&result, cli);
     Ok(())
 }
@@ -573,7 +581,7 @@ fn run_sync_inner(client: &ApiClient, skills_root: &Path) -> Result<()> {
     eprintln!("Skills root: {}", skills_root.display());
     eprintln!("Bisque API dir: {}\n", bisque_api_dir.display());
 
-    let result = client.get_json("/agentBootstrap")?;
+    let result = client.get_json("/v1/bootstrap")?;
     let tools = parse_tools(&result);
 
     if tools.is_empty() {
@@ -788,7 +796,7 @@ fn cmd_doctor(
         auth.api_key,
     );
 
-    let result = match client.get_json("/agentBootstrap") {
+    let result = match client.get_json("/v1/bootstrap") {
         Ok(r) => {
             println!("  Auth: OK");
             r
@@ -1067,7 +1075,12 @@ fn group_tools_by_integration(
     let mut map: HashMap<String, IntegrationGroup> = HashMap::new();
 
     for tool in tools {
-        if let Some(ref id) = tool.integration_id {
+        // v1 uses provider_id; v0 uses integration_id
+        let id_opt = tool
+            .integration_id
+            .as_ref()
+            .or(tool.provider_id.as_ref());
+        if let Some(id) = id_opt {
             let group = map.entry(id.clone()).or_insert_with(|| {
                 IntegrationGroup {
                     integration_id: id.clone(),
@@ -1175,18 +1188,18 @@ Tool call responses are JSON with this shape:
 ```json
 {{
   "status": "succeeded",
-  "summary": "Human-readable result summary.",
   "data": {{}}
 }}
 ```
 
 - `status` is `"succeeded"`, `"failed"`, or `"denied"`.
-- `summary` is always present — use it when relaying results to the user.
-- `data` is optional structured output.
+- `data` contains the raw API response.
+- If `status` is `"failed"`, an `error` string is included.
+- Use `--field data` to extract just the API response data.
 
 ## Guidelines
 
-- Use the `summary` field to respond to the user — do not dump raw `data`
+- Summarize the `data` field for the user — do not dump raw JSON
   unless they ask for details.
 - If a tool returns `"denied"`, tell the user the integration may need
   re-authorization at bisque.tools.
@@ -1229,15 +1242,18 @@ fn print_json(value: &Value, pretty: bool) {
 
 fn print_result(result: &Value, cli: &Cli) {
     if cli.summary_only {
+        // v1 tool-call: check error, then status
         let summary = result
-            .get("summary")
+            .get("error")
             .and_then(|v| v.as_str())
+            .or_else(|| result.get("summary").and_then(|v| v.as_str()))
             .or_else(|| {
                 result
                     .get("result")
                     .and_then(|r| r.get("summary"))
                     .and_then(|v| v.as_str())
-            });
+            })
+            .or_else(|| result.get("status").and_then(|v| v.as_str()));
         match summary {
             Some(s) => println!("{s}"),
             None => print_json(result, cli.pretty),
