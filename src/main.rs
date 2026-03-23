@@ -7,6 +7,7 @@ mod config;
 pub const DEFAULT_BASE_URL: &str = "https://bisque.tools";
 pub const GENERATED_SKILL_PREFIX: &str = "bisque-";
 pub const CORE_SKILL_DIR_NAME: &str = "bisque-api";
+pub const DISCOVERY_SKILL_DIR_NAME: &str = "bisque-available-integrations";
 
 #[derive(Parser)]
 #[command(

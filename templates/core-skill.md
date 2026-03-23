@@ -120,8 +120,8 @@ integrations, and flags stale generated skill directories.
 ### 6. Connect new integrations
 
 If the task at hand would benefit from an integration the user hasn't
-connected yet, check the "Available integrations" section at the bottom of
-this file (added automatically by `bisque sync`).
+connected yet, check the **Available Integrations** skill (generated
+automatically by `bisque sync`) for a list of unconnected integrations.
 
 To connect a new integration, run:
 

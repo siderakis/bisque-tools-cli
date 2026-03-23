@@ -1,6 +1,9 @@
 use crate::api::ApiClient;
 use crate::config::{self, BisqueConfig, BisqueProfile};
-use crate::{Cli, Command, CORE_SKILL_DIR_NAME, GENERATED_SKILL_PREFIX};
+use crate::{
+    Cli, Command, CORE_SKILL_DIR_NAME, DISCOVERY_SKILL_DIR_NAME,
+    GENERATED_SKILL_PREFIX,
+};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -659,17 +662,24 @@ fn run_sync_inner(client: &ApiClient, skills_root: &Path) -> Result<()> {
         }
     }
 
-    // Remove stale dirs
+    // Remove stale integration dirs (but not the discovery skill)
     let mut removed = Vec::new();
     for dir in &existing_dirs {
-        if !current_dirs.contains(dir) {
+        if !current_dirs.contains(dir)
+            && dir != DISCOVERY_SKILL_DIR_NAME
+        {
             let _ = fs::remove_dir_all(skills_root.join(dir));
             removed.push(dir.clone());
         }
     }
 
-    // Update core SKILL.md with unconnected integrations discovery section
-    update_core_skill_with_discovery(&result, &bisque_api_dir)?;
+    // Generate or remove the discovery skill for unconnected integrations
+    let has_discovery = sync_discovery_skill(&result, skills_root)?;
+
+    // Refresh core SKILL.md from template (keeps it in sync with CLI updates)
+    if bisque_api_dir.exists() {
+        fs::write(bisque_api_dir.join("SKILL.md"), CORE_SKILL_MD)?;
+    }
 
     // Summary
     eprintln!("Synced {} integration(s):", groups.len());
@@ -682,6 +692,9 @@ fn run_sync_inner(client: &ApiClient, skills_root: &Path) -> Result<()> {
     for name in &removed {
         eprintln!("  - {name} (removed)");
     }
+    if has_discovery {
+        eprintln!("  ~ {DISCOVERY_SKILL_DIR_NAME} (discovery)");
+    }
     if added.is_empty() && updated.is_empty() && removed.is_empty() {
         eprintln!("  (no changes)");
     }
@@ -689,31 +702,30 @@ fn run_sync_inner(client: &ApiClient, skills_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Reads the core SKILL.md template and appends a section listing
-/// unconnected integrations with `bisque connect` commands.
-fn update_core_skill_with_discovery(
+/// Generates or removes the `bisque-available-integrations` discovery skill.
+///
+/// Lists all unconnected integrations with `bisque connect` commands so the
+/// agent can suggest new integrations when relevant. If every integration
+/// is connected, the discovery skill directory is removed.
+fn sync_discovery_skill(
     bootstrap: &Value,
-    bisque_api_dir: &Path,
-) -> Result<()> {
-    let skill_md_path = bisque_api_dir.join("SKILL.md");
-    if !skill_md_path.exists() {
-        return Ok(());
-    }
+    skills_root: &Path,
+) -> Result<bool> {
+    let dir_path = skills_root.join(DISCOVERY_SKILL_DIR_NAME);
 
     let status = match bootstrap
         .get("integrationStatus")
         .and_then(|v| v.as_object())
     {
         Some(s) => s,
-        None => return Ok(()),
+        None => {
+            let _ = fs::remove_dir_all(&dir_path);
+            return Ok(false);
+        }
     };
 
     // Integrations that are not agent-connectable (skip them)
-    let skip = [
-        "google",
-        "imessage",
-        "weather",
-    ];
+    let skip = ["google", "imessage", "weather"];
 
     let mut unconnected: Vec<(String, String)> = Vec::new();
     for (key, value) in status {
@@ -725,60 +737,63 @@ fn update_core_skill_with_discovery(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if !connected {
-            let slug = integration_slug(key);
             let label = integration_label(key).to_string();
-            unconnected.push((slug, label));
+            let slug = integration_slug(key);
+            unconnected.push((label, slug));
         }
+    }
+
+    if unconnected.is_empty() {
+        let _ = fs::remove_dir_all(&dir_path);
+        return Ok(false);
     }
 
     unconnected.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Read existing SKILL.md
-    let mut content =
-        fs::read_to_string(&skill_md_path).unwrap_or_default();
+    // Build a short list of names for the frontmatter description
+    let names: Vec<&str> =
+        unconnected.iter().map(|(l, _)| l.as_str()).collect();
+    let names_summary = if names.len() <= 4 {
+        names.join(", ")
+    } else {
+        format!(
+            "{}, and {} more",
+            names[..3].join(", "),
+            names.len() - 3
+        )
+    };
 
-    // Remove any previous discovery section
-    if let Some(pos) =
-        content.find("\n## Available integrations (not connected)")
-    {
-        content.truncate(pos);
+    let mut rows = String::new();
+    for (label, slug) in &unconnected {
+        rows.push_str(&format!(
+            "| {label} | `bisque connect {slug}` |\n"
+        ));
     }
 
-    // Append discovery section if there are unconnected integrations
-    if !unconnected.is_empty() {
-        content.push_str(
-            "\n## Available integrations (not connected)\n\n",
-        );
-        content.push_str(
-            "The following integrations are available but the user hasn't connected them yet.\n",
-        );
-        content.push_str(
-            "If any of these would help with the current task, let the user know and offer to\n",
-        );
-        content.push_str(
-            "open the setup page:\n\n",
-        );
-        content.push_str(
-            "| Integration | Connect command |\n",
-        );
-        content.push_str(
-            "|-------------|----------------|\n",
-        );
-        for (slug, label) in &unconnected {
-            content.push_str(&format!(
-                "| {label} | `bisque connect {slug}` |\n"
-            ));
-        }
-        content.push_str(
-            "\nRunning `bisque connect <name>` opens the browser to the OAuth/setup page.\n",
-        );
-        content.push_str(
-            "After the user completes setup, run `bisque sync` to pull in the new tools.\n",
-        );
-    }
+    let content = format!(
+        r#"---
+name: Available Integrations
+description: Discover and connect new API integrations via Bisque — {names_summary}.
+---
 
-    fs::write(&skill_md_path, content)?;
-    Ok(())
+# Available Integrations
+
+These integrations are available but not yet connected. If any would help
+with the current task, suggest it to the user and run the connect command.
+
+| Integration | Connect command |
+|-------------|----------------|
+{rows}
+Running `bisque connect <name>` opens the browser to the setup page.
+After the user completes setup, run `bisque sync` to refresh available tools.
+"#,
+        names_summary = names_summary,
+        rows = rows,
+    );
+
+    fs::create_dir_all(&dir_path)?;
+    fs::write(dir_path.join("SKILL.md"), content)?;
+    Ok(true)
 }
 
 // ─── Doctor ─────────────────────────────────────────────────────────
@@ -1171,6 +1186,7 @@ fn find_existing_generated_dirs(skills_root: &Path) -> HashSet<String> {
                         entry.file_name().to_string_lossy().to_string();
                     if name.starts_with(GENERATED_SKILL_PREFIX)
                         && name != CORE_SKILL_DIR_NAME
+                        && name != DISCOVERY_SKILL_DIR_NAME
                     {
                         dirs.insert(name);
                     }
@@ -1184,15 +1200,10 @@ fn find_existing_generated_dirs(skills_root: &Path) -> HashSet<String> {
 /// Return the `expand_scopes` section for Google integrations that have write
 /// tools, or an empty string for everything else.
 fn google_scope_expansion_section(group: &IntegrationGroup) -> String {
-    let has_write = group
-        .tools
-        .iter()
-        .any(|t| t.access.as_deref() == Some("write"));
-    if !has_write {
-        return String::new();
-    }
-
-    // Map integration_id → (web_integration_id, write scopes)
+    // Always include scope expansion for known Google integrations.
+    // Write tools may be filtered out by the backend when the user lacks
+    // write scopes, but the section is still needed so the agent knows how
+    // to guide the user through granting those scopes.
     let scope_info: Option<(&str, &str)> = match group.integration_id.as_str() {
         "google-tag-manager" => Some((
             "googleTagManager",
@@ -1216,15 +1227,18 @@ fn google_scope_expansion_section(group: &IntegrationGroup) -> String {
         r#"
 ## Scope expansion
 
-If a write tool fails with a **403 "insufficient authentication scopes"**
-error, the user needs to grant additional OAuth scopes. Run:
+This integration supports write operations that may require additional OAuth
+scopes. If a tool call fails with a **403 "insufficient authentication scopes"**
+error, or if write tools are not listed above, the user needs to grant
+additional scopes. Run:
 
 ```bash
 open "https://bisque.tools/integrations?integration={web_id}&expand_scopes={scopes}"
 ```
 
 This auto-triggers the Google OAuth consent screen for the missing scopes.
-Once the user approves, retry the tool call.
+Once the user approves, re-run `bisque sync` to refresh available tools, then
+retry the tool call.
 "#,
         web_id = web_id,
         scopes = scopes,
