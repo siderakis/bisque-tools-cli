@@ -139,6 +139,13 @@ setup, run `bisque sync` to pull in the new tools.
   unless they ask for details.
 - If a tool returns `"denied"`, tell the user the integration may need
   re-authorization in the Bisque web app.
+- If a Google tool returns a **403 "insufficient authentication scopes"**
+  error, the user needs to grant additional OAuth scopes. Open the scope
+  expansion URL to auto-trigger the consent screen:
+  ```bash
+  open "https://bisque.tools/integrations?integration=<integrationId>&expand_scopes=<scope1>,<scope2>"
+  ```
+  After the user approves, retry the tool call.
 - If auth fails (`INVALID_API_KEY` or `MISSING_USER_ID`), tell the user to
   check their credentials and rotate the key at bisque.tools if needed.
 - If a tool returns `TOOL_NOT_AVAILABLE`, re-run `sync` to refresh

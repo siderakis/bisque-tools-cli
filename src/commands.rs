@@ -1181,6 +1181,56 @@ fn find_existing_generated_dirs(skills_root: &Path) -> HashSet<String> {
     dirs
 }
 
+/// Return the `expand_scopes` section for Google integrations that have write
+/// tools, or an empty string for everything else.
+fn google_scope_expansion_section(group: &IntegrationGroup) -> String {
+    let has_write = group
+        .tools
+        .iter()
+        .any(|t| t.access.as_deref() == Some("write"));
+    if !has_write {
+        return String::new();
+    }
+
+    // Map integration_id → (web_integration_id, write scopes)
+    let scope_info: Option<(&str, &str)> = match group.integration_id.as_str() {
+        "google-tag-manager" => Some((
+            "googleTagManager",
+            "tagmanager.edit_containers,tagmanager.publish",
+        )),
+        "google-gmail" => Some(("gmail", "gmail.modify")),
+        "google-calendar" => Some(("googleCalendar", "calendar.events")),
+        "google-sheets" => Some(("googleSheets", "sheets")),
+        "google-search-console" => {
+            Some(("googleSearchConsole", "searchconsole"))
+        }
+        _ => None,
+    };
+
+    let (web_id, scopes) = match scope_info {
+        Some(pair) => pair,
+        None => return String::new(),
+    };
+
+    format!(
+        r#"
+## Scope expansion
+
+If a write tool fails with a **403 "insufficient authentication scopes"**
+error, the user needs to grant additional OAuth scopes. Run:
+
+```bash
+open "https://bisque.tools/integrations?integration={web_id}&expand_scopes={scopes}"
+```
+
+This auto-triggers the Google OAuth consent screen for the missing scopes.
+Once the user approves, retry the tool call.
+"#,
+        web_id = web_id,
+        scopes = scopes,
+    )
+}
+
 fn generate_integration_skill_md(group: &IntegrationGroup) -> String {
     let tool_rows: String = group
         .tools
@@ -1197,6 +1247,7 @@ fn generate_integration_skill_md(group: &IntegrationGroup) -> String {
         .join("\n");
 
     let plural = if group.tools.len() == 1 { "" } else { "s" };
+    let scope_section = google_scope_expansion_section(group);
 
     format!(
         r#"---
@@ -1237,19 +1288,22 @@ Tool call responses are JSON with this shape:
 - `data` contains the raw API response.
 - If `status` is `"failed"`, an `error` string is included.
 - Use `--field data` to extract just the API response data.
-
+{scope_section}
 ## Guidelines
 
 - Summarize the `data` field for the user — do not dump raw JSON
   unless they ask for details.
 - If a tool returns `"denied"`, tell the user the integration may need
   re-authorization at bisque.tools.
+- If a tool returns a 403 scope error, use `open` to launch the scope
+  expansion URL as described above, then retry after the user approves.
 - Use `--pretty` if you need human-readable JSON output.
 "#,
         label = group.label,
         count = group.tools.len(),
         plural = plural,
         tool_rows = tool_rows,
+        scope_section = scope_section,
     )
 }
 
