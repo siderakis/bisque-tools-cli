@@ -1508,7 +1508,7 @@ fn cmd_update(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     let current_exe = std::env::current_exe()
         .context("Failed to determine current executable path")?;
 
-    let tmp_path = current_exe.with_extension("tmp");
+    let tmp_path = std::env::temp_dir().join("bisque-update.tmp");
 
     let mut found = false;
     for entry in archive.entries().context("Failed to read archive")? {
