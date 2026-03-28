@@ -1,5 +1,15 @@
 use anyhow::{bail, Result};
 use serde_json::Value;
+use std::io::Read;
+
+/// Response from a tool call — either JSON data or raw binary bytes.
+pub enum ToolCallResponse {
+    Json(Value),
+    Binary {
+        content_type: String,
+        data: Vec<u8>,
+    },
+}
 
 pub struct ApiClient {
     pub base_url: String,
@@ -34,6 +44,51 @@ impl ApiClient {
             .set("Content-Type", "application/json")
             .send_string(&body_str);
         Self::parse_response(result)
+    }
+
+    /// POST a tool call and return either JSON or raw binary based on Content-Type.
+    pub fn post_tool_call(&self, path: &str, body: &Value) -> Result<ToolCallResponse> {
+        let url = format!("{}{}", self.base_url, path);
+        let body_str = serde_json::to_string(body)?;
+        let result = ureq::post(&url)
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .set("X-Bisque-User-Id", &self.user_id)
+            .set("Content-Type", "application/json")
+            .send_string(&body_str);
+
+        match result {
+            Ok(resp) => {
+                let content_type = resp
+                    .header("Content-Type")
+                    .unwrap_or("application/json")
+                    .to_string();
+
+                if content_type.contains("application/json") || content_type.contains("text/") {
+                    // JSON response — parse as before
+                    let body = resp.into_string()?;
+                    if body.trim().is_empty() {
+                        Ok(ToolCallResponse::Json(serde_json::json!({"ok": true})))
+                    } else {
+                        Ok(ToolCallResponse::Json(serde_json::from_str(&body)?))
+                    }
+                } else {
+                    // Binary response — read raw bytes
+                    let mut data = Vec::new();
+                    resp.into_reader().read_to_end(&mut data)?;
+                    Ok(ToolCallResponse::Binary { content_type, data })
+                }
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                let detail = if body.is_empty() {
+                    format!("HTTP {code}")
+                } else {
+                    truncate_safe(&body, 300)
+                };
+                bail!("Request failed ({code}): {detail}")
+            }
+            Err(e) => bail!("Request failed: {e}"),
+        }
     }
 
     fn parse_response(

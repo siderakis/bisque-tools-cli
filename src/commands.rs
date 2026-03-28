@@ -1,4 +1,4 @@
-use crate::api::ApiClient;
+use crate::api::{ApiClient, ToolCallResponse};
 use crate::config::{self, BisqueConfig, BisqueProfile};
 use crate::{
     Cli, Command, CORE_SKILL_DIR_NAME, DISCOVERY_SKILL_DIR_NAME,
@@ -153,9 +153,13 @@ fn browser_login(
 ) -> Result<()> {
     // 1. Create session
     let url = format!("{base_url}/api/create-cli-session");
+    let session_body = match hostname::get() {
+        Ok(name) => serde_json::json!({ "name": name.to_string_lossy() }).to_string(),
+        Err(_) => "{}".to_string(),
+    };
     let resp = ureq::post(&url)
         .set("Content-Type", "application/json")
-        .send_string("{}")
+        .send_string(&session_body)
         .context("Failed to create CLI session")?;
 
     let body: Value = serde_json::from_str(
@@ -582,9 +586,55 @@ fn cmd_call(
         body["invocationId"] = Value::String(id.to_string());
     }
 
-    let result = client.post_json("/v1/tool-call", &body)?;
-    print_result(&result, cli);
+    let response = client.post_tool_call("/v1/tool-call", &body)?;
+    match response {
+        ToolCallResponse::Json(result) => {
+            print_result(&result, cli);
+        }
+        ToolCallResponse::Binary { content_type, data } => {
+            let stdout = io::stdout();
+            if stdout.is_terminal() {
+                // Interactive terminal — don't dump binary, show metadata
+                let ext = mime_to_ext(&content_type);
+                eprintln!(
+                    "Binary response: {} ({} bytes, {})",
+                    content_type,
+                    data.len(),
+                    ext,
+                );
+                eprintln!("Pipe to a file to save: bisque call {} --args '...' > output.{}",
+                    tool_name, ext);
+            } else {
+                // Piped — write raw bytes to stdout
+                let mut out = stdout.lock();
+                out.write_all(&data)?;
+                out.flush()?;
+            }
+        }
+    }
     Ok(())
+}
+
+fn mime_to_ext(content_type: &str) -> &str {
+    if content_type.contains("audio/mpeg") {
+        "mp3"
+    } else if content_type.contains("audio/wav") {
+        "wav"
+    } else if content_type.contains("audio/ogg") {
+        "ogg"
+    } else if content_type.contains("audio/flac") {
+        "flac"
+    } else if content_type.contains("image/png") {
+        "png"
+    } else if content_type.contains("image/jpeg") {
+        "jpg"
+    } else if content_type.contains("application/pdf") {
+        "pdf"
+    } else if content_type.contains("application/zip") {
+        "zip"
+    } else {
+        "bin"
+    }
 }
 
 // ─── Sync ───────────────────────────────────────────────────────────
