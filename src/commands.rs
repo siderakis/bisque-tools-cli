@@ -25,12 +25,8 @@ struct BootstrapTool {
     description: String,
     #[serde(default)]
     parameters: Value,
-    // v0 fields (kept for backwards compat)
-    integration_id: Option<String>,
-    web_integration_id: Option<String>,
     access: Option<String>,
     safe: Option<bool>,
-    // v1 fields
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
@@ -41,8 +37,6 @@ struct BootstrapTool {
 
 struct IntegrationGroup {
     integration_id: String,
-    #[allow(dead_code)]
-    web_integration_id: String,
     label: String,
     tools: Vec<BootstrapTool>,
 }
@@ -765,6 +759,7 @@ fn sync_discovery_skill(
 
     let status = match bootstrap
         .get("integrationStatus")
+        .and_then(|v| v.get("providers"))
         .and_then(|v| v.as_object())
     {
         Some(s) => s,
@@ -775,7 +770,7 @@ fn sync_discovery_skill(
     };
 
     // Integrations that are not agent-connectable (skip them)
-    let skip = ["google", "imessage", "weather"];
+    let skip = ["weather"];
 
     let mut unconnected: Vec<(String, String)> = Vec::new();
     for (key, value) in status {
@@ -787,8 +782,8 @@ fn sync_discovery_skill(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if !connected {
-            let label = integration_label(key).to_string();
-            let slug = integration_slug(key);
+            let label = label_from_integration_id(key);
+            let slug = key.clone();
             unconnected.push((label, slug));
         }
     }
@@ -917,14 +912,15 @@ fn cmd_doctor(
     let tools = parse_tools(&result);
     println!("\nIntegrations:");
 
-    if let Some(status) = result
+    if let Some(providers) = result
         .get("integrationStatus")
+        .and_then(|v| v.get("providers"))
         .and_then(|v| v.as_object())
     {
         let mut connected = Vec::new();
         let mut disconnected = Vec::new();
 
-        for (key, value) in status {
+        for (key, value) in providers {
             if value
                 .get("connected")
                 .and_then(|v| v.as_bool())
@@ -942,16 +938,15 @@ fn cmd_doctor(
         if !connected.is_empty() {
             println!("  Connected:");
             for name in &connected {
-                println!("    + {name}");
+                println!("    + {}", label_from_integration_id(name));
             }
         }
         if !disconnected.is_empty() {
             println!("  Available (not connected):");
             for name in &disconnected {
-                let slug = integration_slug(name);
                 println!(
-                    "    - {} (bisque connect {slug})",
-                    integration_label(name)
+                    "    - {} (bisque connect {name})",
+                    label_from_integration_id(name)
                 );
             }
         }
@@ -1000,66 +995,13 @@ fn cmd_doctor(
 // ─── Connect ────────────────────────────────────────────────────────
 
 /// Maps integration status keys to web UI URL paths.
-fn integration_url_path(integration: &str) -> Option<&'static str> {
-    match integration {
-        "google" | "gmail" | "google-calendar" | "googleCalendar"
-        | "google-analytics" | "googleAnalytics"
-        | "google-search-console" | "googleSearchConsole"
-        | "google-tag-manager" | "googleTagManager"
-        | "google-sheets" | "googleSheets" => {
-            Some("/integrations/google")
-        }
-        "tesla" => Some("/integrations/tesla"),
-        "stripe" => Some("/integrations/stripe"),
-        "mailchimp" => Some("/integrations/mailchimp"),
-        "klaviyo" => Some("/integrations/klaviyo"),
-        "x" => Some("/integrations/x"),
-        "meta-ads" | "metaAds" => Some("/integrations/meta-ads"),
-        "reddit-ads" | "redditAds" => {
-            Some("/integrations/reddit-ads")
-        }
-        _ => None,
+fn integration_url_path(integration: &str) -> Option<String> {
+    // Google services all share a single integrations page
+    if integration.starts_with("google-") || integration == "google" {
+        return Some("/integrations/google".to_string());
     }
-}
-
-/// Human-readable label for an integration status key.
-fn integration_label(key: &str) -> &str {
-    match key {
-        "google" => "Google",
-        "gmail" => "Gmail",
-        "googleCalendar" => "Google Calendar",
-        "tesla" => "Tesla",
-        "imessage" => "iMessage",
-        "weather" => "Weather",
-        "stripe" => "Stripe",
-        "mailchimp" => "Mailchimp",
-        "klaviyo" => "Klaviyo",
-        "x" => "X (Twitter)",
-        "ahrefs" => "Ahrefs",
-        "metaAds" => "Meta Ads",
-        "redditAds" => "Reddit Ads",
-        "googleAnalytics" => "Google Analytics",
-        "googleSearchConsole" => "Google Search Console",
-        "googleTagManager" => "Google Tag Manager",
-        "googleSheets" => "Google Sheets",
-        "firestore" => "Firestore",
-        _ => key,
-    }
-}
-
-/// Slug form for CLI usage (e.g., "googleAnalytics" → "google-analytics").
-fn integration_slug(key: &str) -> String {
-    // Convert camelCase to kebab-case
-    let mut result = String::new();
-    for (i, ch) in key.chars().enumerate() {
-        if ch.is_uppercase() && i > 0 {
-            result.push('-');
-            result.push(ch.to_lowercase().next().unwrap());
-        } else {
-            result.push(ch);
-        }
-    }
-    result
+    // All other providers use /integrations/{provider-id}
+    Some(format!("/integrations/{integration}"))
 }
 
 fn cmd_connect(
@@ -1181,19 +1123,10 @@ fn group_tools_by_integration(
     let mut map: HashMap<String, IntegrationGroup> = HashMap::new();
 
     for tool in tools {
-        // v1 uses provider_id; v0 uses integration_id
-        let id_opt = tool
-            .integration_id
-            .as_ref()
-            .or(tool.provider_id.as_ref());
-        if let Some(id) = id_opt {
+        if let Some(id) = tool.provider_id.as_ref() {
             let group = map.entry(id.clone()).or_insert_with(|| {
                 IntegrationGroup {
                     integration_id: id.clone(),
-                    web_integration_id: tool
-                        .web_integration_id
-                        .clone()
-                        .unwrap_or_else(|| id.clone()),
                     label: label_from_integration_id(id),
                     tools: Vec::new(),
                 }
@@ -1256,19 +1189,19 @@ fn google_scope_expansion_section(group: &IntegrationGroup) -> String {
     // to guide the user through granting those scopes.
     let scope_info: Option<(&str, &str)> = match group.integration_id.as_str() {
         "google-tag-manager" => Some((
-            "googleTagManager",
+            "google-tag-manager",
             "tagmanager.edit_containers,tagmanager.publish",
         )),
-        "google-gmail" => Some(("gmail", "gmail.modify")),
-        "google-calendar" => Some(("googleCalendar", "calendar.events")),
-        "google-sheets" => Some(("googleSheets", "sheets")),
+        "google-gmail" => Some(("google-gmail", "gmail.modify")),
+        "google-calendar" => Some(("google-calendar", "calendar.events")),
+        "google-sheets" => Some(("google-sheets", "sheets")),
         "google-search-console" => {
-            Some(("googleSearchConsole", "searchconsole"))
+            Some(("google-search-console", "searchconsole"))
         }
         _ => None,
     };
 
-    let (web_id, scopes) = match scope_info {
+    let (integration_id, scopes) = match scope_info {
         Some(pair) => pair,
         None => return String::new(),
     };
@@ -1283,14 +1216,14 @@ error, or if write tools are not listed above, the user needs to grant
 additional scopes. Run:
 
 ```bash
-open "https://bisque.tools/integrations?integration={web_id}&expand_scopes={scopes}"
+open "https://bisque.tools/integrations?integration={integration_id}&expand_scopes={scopes}"
 ```
 
 This auto-triggers the Google OAuth consent screen for the missing scopes.
 Once the user approves, re-run `bisque sync` to refresh available tools, then
 retry the tool call.
 "#,
-        web_id = web_id,
+        integration_id = integration_id,
         scopes = scopes,
     )
 }
