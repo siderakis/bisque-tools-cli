@@ -1190,13 +1190,13 @@ fn google_scope_expansion_section(group: &IntegrationGroup) -> String {
     let scope_info: Option<(&str, &str)> = match group.integration_id.as_str() {
         "google-tag-manager" => Some((
             "google-tag-manager",
-            "tagmanager.edit_containers,tagmanager.publish",
+            "https://www.googleapis.com/auth/tagmanager.edit.containers,https://www.googleapis.com/auth/tagmanager.publish",
         )),
-        "google-gmail" => Some(("google-gmail", "gmail.modify")),
-        "google-calendar" => Some(("google-calendar", "calendar.events")),
-        "google-sheets" => Some(("google-sheets", "sheets")),
+        "google-gmail" => Some(("google-gmail", "https://www.googleapis.com/auth/gmail.modify")),
+        "google-calendar" => Some(("google-calendar", "https://www.googleapis.com/auth/calendar.events")),
+        "google-sheets" => Some(("google-sheets", "https://www.googleapis.com/auth/spreadsheets")),
         "google-search-console" => {
-            Some(("google-search-console", "searchconsole"))
+            Some(("google-search-console", "https://www.googleapis.com/auth/webmasters"))
         }
         _ => None,
     };
