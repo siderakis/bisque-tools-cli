@@ -503,21 +503,42 @@ fn cmd_sync(
         all_skills.push(ds);
     }
 
+    let mut unchanged = Vec::new();
+
     for skill in &all_skills {
         let dir_name = &skill.directory_name;
         current_dirs.insert(dir_name.clone());
         let dir_path = skills_root.join(dir_name);
         let existed = existing_dirs.contains(dir_name);
 
-        fs::create_dir_all(&dir_path)?;
-        for (filename, content) in &skill.files {
-            fs::write(dir_path.join(filename), content)?;
+        // Check if any file content actually changed
+        let mut changed = !existed;
+        if existed {
+            for (filename, content) in &skill.files {
+                let file_path = dir_path.join(filename);
+                match fs::read_to_string(&file_path) {
+                    Ok(existing) if existing == *content => {}
+                    _ => {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
         }
 
-        if existed {
+        if changed {
+            fs::create_dir_all(&dir_path)?;
+            for (filename, content) in &skill.files {
+                fs::write(dir_path.join(filename), content)?;
+            }
+        }
+
+        if !existed {
+            added.push(dir_name.clone());
+        } else if changed {
             updated.push(dir_name.clone());
         } else {
-            added.push(dir_name.clone());
+            unchanged.push(dir_name.clone());
         }
     }
 
@@ -542,6 +563,9 @@ fn cmd_sync(
     for name in &removed {
         eprintln!("  - {name} (removed)");
     }
+    if !unchanged.is_empty() {
+        eprintln!("  {} unchanged", unchanged.len());
+    }
     if added.is_empty() && updated.is_empty() && removed.is_empty() {
         eprintln!("  (no changes)");
     }
@@ -556,7 +580,9 @@ fn cmd_sync(
         check_cli_version(latest);
     }
 
-    eprintln!("\nRestart your Claude Code session to pick up the changes.");
+    if !added.is_empty() || !updated.is_empty() || !removed.is_empty() {
+        eprintln!("\nRestart your Claude Code session to pick up the changes.");
+    }
 
     Ok(())
 }
