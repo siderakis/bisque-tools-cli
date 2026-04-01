@@ -1,44 +1,29 @@
 use crate::api::{ApiClient, ToolCallResponse};
 use crate::config::{self, BisqueConfig, BisqueProfile};
-use crate::{
-    Cli, Command, CORE_SKILL_DIR_NAME, DISCOVERY_SKILL_DIR_NAME,
-    GENERATED_SKILL_PREFIX,
-};
+use crate::{Cli, Command, GENERATED_SKILL_PREFIX};
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
-// ─── Embedded SKILL.md template ─────────────────────────────────────
-
-const CORE_SKILL_MD: &str = include_str!("../templates/core-skill.md");
-
 // ─── Types ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BootstrapTool {
-    name: String,
-    description: String,
-    #[serde(default)]
-    parameters: Value,
-    access: Option<String>,
-    safe: Option<bool>,
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    toolbox_id: Option<String>,
-    #[serde(default)]
-    provider_id: Option<String>,
+struct SkillsResponse {
+    skills: Vec<RenderedSkill>,
+    core_skill: RenderedSkill,
+    discovery_skill: Option<RenderedSkill>,
 }
 
-struct IntegrationGroup {
-    integration_id: String,
-    label: String,
-    tools: Vec<BootstrapTool>,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderedSkill {
+    directory_name: String,
+    files: HashMap<String, String>,
 }
 
 // ─── Command dispatch ───────────────────────────────────────────────
@@ -67,20 +52,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Login => {
             cmd_login(&cli, &config, &profile_name, profile.as_ref())
         }
-        Command::Init {
-            agent,
-            skills_dir,
-            force,
-        } => cmd_init(
-            &cli,
-            profile.as_ref(),
-            agent.as_deref(),
-            skills_dir.as_deref(),
-            *force,
-        ),
         Command::Doctor => cmd_doctor(&cli, profile.as_ref()),
-        Command::Tools => cmd_tools(&cli, profile.as_ref()),
-        Command::Bootstrap => cmd_bootstrap(&cli, profile.as_ref()),
         Command::Call {
             tool_name,
             args_json,
@@ -356,14 +328,14 @@ fn manual_login(
         api_key,
     );
 
-    match client.get_json("/v1/bootstrap") {
+    match client.get_json("/v1/toolboxes") {
         Ok(result) => {
             let count = result
-                .get("tools")
-                .and_then(|t| t.as_array())
+                .get("providers")
+                .and_then(|p| p.as_array())
                 .map(|a| a.len())
                 .unwrap_or(0);
-            eprintln!("  Auth OK — {count} tool(s) available.");
+            eprintln!("  Auth OK — {count} integration(s) available.");
         }
         Err(e) => {
             eprintln!("  Auth failed: {e}");
@@ -377,167 +349,6 @@ fn manual_login(
     Ok(())
 }
 
-// ─── Init ───────────────────────────────────────────────────────────
-
-fn cmd_init(
-    cli: &Cli,
-    profile: Option<&BisqueProfile>,
-    agent: Option<&str>,
-    skills_dir: Option<&str>,
-    force: bool,
-) -> Result<()> {
-    // 1. Check credentials
-    let auth = config::resolve_auth(
-        cli.user_id.as_deref(),
-        cli.api_key.as_deref(),
-        cli.base_url.as_deref(),
-        profile,
-    );
-    if auth.user_id.is_empty() || auth.api_key.is_empty() {
-        bail!("No credentials found. Run `bisque login` first.");
-    }
-
-    // 2. Resolve agent / skills root
-    let effective_agent: Option<&str> = if skills_dir.is_some() {
-        None
-    } else {
-        agent.or_else(|| {
-            let detected = detect_agent();
-            if let Some(a) = detected {
-                eprintln!("Detected agent: {a}");
-            }
-            detected
-        })
-    };
-
-    if skills_dir.is_none() && effective_agent.is_none() {
-        bail!("Could not auto-detect agent. Use --agent or --skills-dir.");
-    }
-
-    let skills_root = resolve_skills_root(skills_dir, effective_agent)?;
-    let bisque_api_dir = skills_root.join(CORE_SKILL_DIR_NAME);
-
-    eprintln!("Skills root: {}", skills_root.display());
-    eprintln!("Bisque skill: {}\n", bisque_api_dir.display());
-
-    // 3. Check existing
-    let skill_md_path = bisque_api_dir.join("SKILL.md");
-    if skill_md_path.exists() && !force {
-        bail!(
-            "SKILL.md already exists at {}\nUse --force to overwrite.",
-            skill_md_path.display()
-        );
-    }
-
-    // 4. Write SKILL.md
-    fs::create_dir_all(&bisque_api_dir)
-        .context("Failed to create skill directory")?;
-    fs::write(&skill_md_path, CORE_SKILL_MD)
-        .context("Failed to write SKILL.md")?;
-    eprintln!("Wrote {}", skill_md_path.display());
-
-    // 5. Run sync
-    eprintln!("\nSyncing integrations...");
-    let client =
-        ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
-    run_sync_inner(&client, &skills_root)?;
-
-    // 6. Summary
-    eprintln!("\nDone. Bisque is ready to use.");
-    eprintln!("  bisque tools     — list available tools");
-    eprintln!("  bisque call <t>  — execute a tool");
-    eprintln!("  bisque doctor    — check setup health");
-    Ok(())
-}
-
-// ─── Toolbox discovery ──────────────────────────────────────────────
-
-/// Fetch connected toolbox IDs from /v1/toolboxes and return a bootstrap
-/// URL that pre-loads all of them.
-fn full_bootstrap_path(client: &ApiClient) -> String {
-    let toolbox_ids = match client.get_json("/v1/toolboxes") {
-        Ok(result) => {
-            let mut ids = Vec::new();
-            if let Some(providers) = result.get("providers").and_then(|v| v.as_array()) {
-                for provider in providers {
-                    let connected = provider
-                        .get("connected")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    if !connected {
-                        continue;
-                    }
-                    if let Some(toolboxes) = provider.get("toolboxes").and_then(|v| v.as_array()) {
-                        for tb in toolboxes {
-                            if let Some(id) = tb.get("id").and_then(|v| v.as_str()) {
-                                ids.push(id.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            ids
-        }
-        Err(_) => Vec::new(),
-    };
-
-    if toolbox_ids.is_empty() {
-        "/v1/bootstrap".to_string()
-    } else {
-        format!("/v1/bootstrap?toolboxes={}", toolbox_ids.join(","))
-    }
-}
-
-// ─── Tools ──────────────────────────────────────────────────────────
-
-fn cmd_tools(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
-    let auth = config::require_auth(
-        cli.user_id.as_deref(),
-        cli.api_key.as_deref(),
-        cli.base_url.as_deref(),
-        profile,
-    )?;
-    let client =
-        ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
-    let path = full_bootstrap_path(&client);
-    let result = client.get_json(&path)?;
-    let tools = parse_tools(&result);
-
-    if cli.json {
-        let arr: Vec<Value> = tools
-            .iter()
-            .map(|t| serde_json::to_value(t).unwrap())
-            .collect();
-        print_json(&Value::Array(arr), cli.pretty);
-    } else {
-        for tool in &tools {
-            println!("{} — {}", tool.name, tool.description);
-        }
-        if tools.is_empty() {
-            eprintln!("No tools available.");
-        }
-    }
-    Ok(())
-}
-
-// ─── Bootstrap ──────────────────────────────────────────────────────
-
-fn cmd_bootstrap(
-    cli: &Cli,
-    profile: Option<&BisqueProfile>,
-) -> Result<()> {
-    let auth = config::require_auth(
-        cli.user_id.as_deref(),
-        cli.api_key.as_deref(),
-        cli.base_url.as_deref(),
-        profile,
-    )?;
-    let client =
-        ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
-    let result = client.get_json("/v1/bootstrap")?;
-    print_result(&result, cli);
-    Ok(())
-}
 
 // ─── Call ────────────────────────────────────────────────────────────
 
@@ -659,74 +470,55 @@ fn cmd_sync(
     };
 
     let skills_root = resolve_skills_root(skills_dir, effective_agent)?;
-    run_sync_inner(&client, &skills_root)
-}
-
-fn run_sync_inner(client: &ApiClient, skills_root: &Path) -> Result<()> {
-    let bisque_api_dir = skills_root.join(CORE_SKILL_DIR_NAME);
     eprintln!("Skills root: {}", skills_root.display());
-    eprintln!("Bisque API dir: {}\n", bisque_api_dir.display());
 
-    let path = full_bootstrap_path(client);
-    let result = client.get_json(&path)?;
-    let tools = parse_tools(&result);
+    // Fetch pre-rendered skills from server
+    let result = client.get_json("/v1/skills")?;
+    let response: SkillsResponse = serde_json::from_value(result)
+        .context("Failed to parse /v1/skills response")?;
 
-    if tools.is_empty() {
-        eprintln!("No tools returned by bootstrap. Nothing to sync.");
-        return Ok(());
-    }
-
-    let groups = group_tools_by_integration(&tools);
-    let existing_dirs = find_existing_generated_dirs(skills_root);
+    let existing_dirs = find_existing_generated_dirs(&skills_root);
     let mut current_dirs = HashSet::new();
-
     let mut added = Vec::new();
     let mut updated = Vec::new();
 
-    for group in &groups {
-        let dir_name = skill_dir_name(&group.integration_id);
+    // Write all skills (core + integrations + discovery)
+    let mut all_skills = vec![response.core_skill];
+    all_skills.extend(response.skills);
+    if let Some(ds) = response.discovery_skill {
+        all_skills.push(ds);
+    }
+
+    for skill in &all_skills {
+        let dir_name = &skill.directory_name;
         current_dirs.insert(dir_name.clone());
-        let dir_path = skills_root.join(&dir_name);
-        let existed = existing_dirs.contains(&dir_name);
+        let dir_path = skills_root.join(dir_name);
+        let existed = existing_dirs.contains(dir_name);
 
         fs::create_dir_all(&dir_path)?;
-        fs::write(
-            dir_path.join("SKILL.md"),
-            generate_integration_skill_md(group),
-        )?;
-        fs::write(
-            dir_path.join("tools.json"),
-            generate_tools_json(group),
-        )?;
+        for (filename, content) in &skill.files {
+            fs::write(dir_path.join(filename), content)?;
+        }
 
         if existed {
-            updated.push(dir_name);
+            updated.push(dir_name.clone());
         } else {
-            added.push(dir_name);
+            added.push(dir_name.clone());
         }
     }
 
-    // Remove stale integration dirs (but not the discovery skill)
+    // Remove stale bisque-* dirs not in response
     let mut removed = Vec::new();
     for dir in &existing_dirs {
-        if !current_dirs.contains(dir)
-            && dir != DISCOVERY_SKILL_DIR_NAME
-        {
+        if !current_dirs.contains(dir) {
             let _ = fs::remove_dir_all(skills_root.join(dir));
             removed.push(dir.clone());
         }
     }
 
-    // Generate or remove the discovery skill for unconnected integrations
-    let has_discovery = sync_discovery_skill(&result, skills_root)?;
-
-    // Refresh core SKILL.md from template (keeps it in sync with CLI updates)
-    if bisque_api_dir.exists() {
-        fs::write(bisque_api_dir.join("SKILL.md"), CORE_SKILL_MD)?;
-    }
-
     // Summary
-    eprintln!("Synced {} integration(s):", groups.len());
+    let integration_count = all_skills.len().saturating_sub(1); // exclude core
+    eprintln!("Synced {} integration(s):", integration_count);
     for name in &added {
         eprintln!("  + {name} (new)");
     }
@@ -736,109 +528,11 @@ fn run_sync_inner(client: &ApiClient, skills_root: &Path) -> Result<()> {
     for name in &removed {
         eprintln!("  - {name} (removed)");
     }
-    if has_discovery {
-        eprintln!("  ~ {DISCOVERY_SKILL_DIR_NAME} (discovery)");
-    }
     if added.is_empty() && updated.is_empty() && removed.is_empty() {
         eprintln!("  (no changes)");
     }
 
     Ok(())
-}
-
-/// Generates or removes the `bisque-available-integrations` discovery skill.
-///
-/// Lists all unconnected integrations with `bisque connect` commands so the
-/// agent can suggest new integrations when relevant. If every integration
-/// is connected, the discovery skill directory is removed.
-fn sync_discovery_skill(
-    bootstrap: &Value,
-    skills_root: &Path,
-) -> Result<bool> {
-    let dir_path = skills_root.join(DISCOVERY_SKILL_DIR_NAME);
-
-    let status = match bootstrap
-        .get("integrationStatus")
-        .and_then(|v| v.get("providers"))
-        .and_then(|v| v.as_object())
-    {
-        Some(s) => s,
-        None => {
-            let _ = fs::remove_dir_all(&dir_path);
-            return Ok(false);
-        }
-    };
-
-    // Integrations that are not agent-connectable (skip them)
-    let skip = ["weather"];
-
-    let mut unconnected: Vec<(String, String)> = Vec::new();
-    for (key, value) in status {
-        if skip.contains(&key.as_str()) {
-            continue;
-        }
-        let connected = value
-            .get("connected")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !connected {
-            let label = label_from_integration_id(key);
-            let slug = key.clone();
-            unconnected.push((label, slug));
-        }
-    }
-
-    if unconnected.is_empty() {
-        let _ = fs::remove_dir_all(&dir_path);
-        return Ok(false);
-    }
-
-    unconnected.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Build a short list of names for the frontmatter description
-    let names: Vec<&str> =
-        unconnected.iter().map(|(l, _)| l.as_str()).collect();
-    let names_summary = if names.len() <= 4 {
-        names.join(", ")
-    } else {
-        format!(
-            "{}, and {} more",
-            names[..3].join(", "),
-            names.len() - 3
-        )
-    };
-
-    let mut rows = String::new();
-    for (label, slug) in &unconnected {
-        rows.push_str(&format!(
-            "| {label} | `bisque connect {slug}` |\n"
-        ));
-    }
-
-    let content = format!(
-        r#"---
-name: Available Integrations
-description: Discover and connect new API integrations via Bisque — {names_summary}.
----
-
-# Available Integrations
-
-These integrations are available but not yet connected. If any would help
-with the current task, suggest it to the user and run the connect command.
-
-| Integration | Connect command |
-|-------------|----------------|
-{rows}
-Running `bisque connect <name>` opens the browser to the setup page.
-After the user completes setup, run `bisque sync` to refresh available tools.
-"#,
-        names_summary = names_summary,
-        rows = rows,
-    );
-
-    fs::create_dir_all(&dir_path)?;
-    fs::write(dir_path.join("SKILL.md"), content)?;
-    Ok(true)
 }
 
 // ─── Doctor ─────────────────────────────────────────────────────────
@@ -888,7 +582,7 @@ fn cmd_doctor(
         std::process::exit(if ok { 0 } else { 1 });
     }
 
-    // 2. Bootstrap auth
+    // 2. API auth check via /v1/toolboxes
     println!("\nChecking API ({})...", auth.base_url);
     let client = ApiClient::new(
         auth.base_url,
@@ -896,8 +590,7 @@ fn cmd_doctor(
         auth.api_key,
     );
 
-    let bootstrap_path = full_bootstrap_path(&client);
-    let result = match client.get_json(&bootstrap_path) {
+    let result = match client.get_json("/v1/toolboxes") {
         Ok(r) => {
             println!("  Auth: OK");
             r
@@ -908,27 +601,46 @@ fn cmd_doctor(
         }
     };
 
-    // 3. Integration status
-    let tools = parse_tools(&result);
+    // 3. Integration status from /v1/toolboxes response
     println!("\nIntegrations:");
+    let mut tool_count = 0;
+    let mut provider_count = 0;
 
     if let Some(providers) = result
-        .get("integrationStatus")
-        .and_then(|v| v.get("providers"))
-        .and_then(|v| v.as_object())
+        .get("providers")
+        .and_then(|v| v.as_array())
     {
         let mut connected = Vec::new();
         let mut disconnected = Vec::new();
 
-        for (key, value) in providers {
-            if value
+        for provider in providers {
+            let label = provider
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let id = provider
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let is_connected = provider
                 .get("connected")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                connected.push(key.as_str());
+                .unwrap_or(false);
+
+            if is_connected {
+                // Count tools from connected providers
+                if let Some(toolboxes) = provider.get("toolboxes").and_then(|v| v.as_array()) {
+                    for tb in toolboxes {
+                        tool_count += tb
+                            .get("toolCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                    }
+                }
+                connected.push(label.to_string());
+                provider_count += 1;
             } else {
-                disconnected.push(key.as_str());
+                disconnected.push((label.to_string(), id.to_string()));
             }
         }
 
@@ -938,16 +650,13 @@ fn cmd_doctor(
         if !connected.is_empty() {
             println!("  Connected:");
             for name in &connected {
-                println!("    + {}", label_from_integration_id(name));
+                println!("    + {name}");
             }
         }
         if !disconnected.is_empty() {
             println!("  Available (not connected):");
-            for name in &disconnected {
-                println!(
-                    "    - {} (bisque connect {name})",
-                    label_from_integration_id(name)
-                );
+            for (name, id) in &disconnected {
+                println!("    - {name} (bisque connect {id})");
             }
         }
     }
@@ -955,31 +664,22 @@ fn cmd_doctor(
     // 4. Stale generated dirs
     if let Ok(skills_root) = resolve_skills_root(None, None) {
         let existing_dirs = find_existing_generated_dirs(&skills_root);
-        let groups = group_tools_by_integration(&tools);
-        let current_dirs: HashSet<String> = groups
-            .iter()
-            .map(|g| skill_dir_name(&g.integration_id))
-            .collect();
 
-        let stale: Vec<&String> = existing_dirs
-            .iter()
-            .filter(|d| !current_dirs.contains(*d))
-            .collect();
-
-        if !stale.is_empty() {
-            println!("\n  Stale skill directories (run sync to clean up):");
-            for name in &stale {
-                println!("    ! {name}");
+        // Expected dirs: bisque-api + one per connected provider
+        // We can't know exact dir names without calling /v1/skills,
+        // so just report dirs that exist on disk for awareness
+        if !existing_dirs.is_empty() {
+            println!("\n  Skill directories on disk:");
+            for name in &existing_dirs {
+                println!("    {name}");
             }
-            ok = false;
+            println!("  Run `bisque sync` to refresh.");
         }
     }
 
-    let group_count = group_tools_by_integration(&tools).len();
     println!(
         "\nTools: {} available across {} integration(s)",
-        tools.len(),
-        group_count
+        tool_count, provider_count
     );
     println!(
         "{}",
@@ -1103,62 +803,6 @@ fn resolve_skills_root(
     bail!("Could not determine skills directory. Use --skills-dir or --agent.");
 }
 
-fn parse_tools(result: &Value) -> Vec<BootstrapTool> {
-    result
-        .get("tools")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| {
-                    serde_json::from_value::<BootstrapTool>(v.clone()).ok()
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn group_tools_by_integration(
-    tools: &[BootstrapTool],
-) -> Vec<IntegrationGroup> {
-    let mut map: HashMap<String, IntegrationGroup> = HashMap::new();
-
-    for tool in tools {
-        if let Some(id) = tool.provider_id.as_ref() {
-            let group = map.entry(id.clone()).or_insert_with(|| {
-                IntegrationGroup {
-                    integration_id: id.clone(),
-                    label: label_from_integration_id(id),
-                    tools: Vec::new(),
-                }
-            });
-            group.tools.push(tool.clone());
-        }
-    }
-
-    let mut groups: Vec<IntegrationGroup> = map.into_values().collect();
-    groups.sort_by(|a, b| a.integration_id.cmp(&b.integration_id));
-    groups
-}
-
-fn label_from_integration_id(id: &str) -> String {
-    id.split('-')
-        .map(|w| {
-            let mut chars = w.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(c) => {
-                    c.to_uppercase().to_string() + chars.as_str()
-                }
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn skill_dir_name(integration_id: &str) -> String {
-    format!("{GENERATED_SKILL_PREFIX}{integration_id}")
-}
-
 fn find_existing_generated_dirs(skills_root: &Path) -> HashSet<String> {
     let mut dirs = HashSet::new();
     if let Ok(entries) = fs::read_dir(skills_root) {
@@ -1167,10 +811,7 @@ fn find_existing_generated_dirs(skills_root: &Path) -> HashSet<String> {
                 if ft.is_dir() {
                     let name =
                         entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with(GENERATED_SKILL_PREFIX)
-                        && name != CORE_SKILL_DIR_NAME
-                        && name != DISCOVERY_SKILL_DIR_NAME
-                    {
+                    if name.starts_with(GENERATED_SKILL_PREFIX) {
                         dirs.insert(name);
                     }
                 }
@@ -1178,147 +819,6 @@ fn find_existing_generated_dirs(skills_root: &Path) -> HashSet<String> {
         }
     }
     dirs
-}
-
-/// Return the `expand_scopes` section for Google integrations that have write
-/// tools, or an empty string for everything else.
-fn google_scope_expansion_section(group: &IntegrationGroup) -> String {
-    // Always include scope expansion for known Google integrations.
-    // Write tools may be filtered out by the backend when the user lacks
-    // write scopes, but the section is still needed so the agent knows how
-    // to guide the user through granting those scopes.
-    let scope_info: Option<(&str, &str)> = match group.integration_id.as_str() {
-        "google-tag-manager" => Some((
-            "google-tag-manager",
-            "https://www.googleapis.com/auth/tagmanager.edit.containers,https://www.googleapis.com/auth/tagmanager.publish",
-        )),
-        "google-gmail" => Some(("google-gmail", "https://www.googleapis.com/auth/gmail.modify")),
-        "google-calendar" => Some(("google-calendar", "https://www.googleapis.com/auth/calendar.events")),
-        "google-sheets" => Some(("google-sheets", "https://www.googleapis.com/auth/spreadsheets")),
-        "google-search-console" => {
-            Some(("google-search-console", "https://www.googleapis.com/auth/webmasters"))
-        }
-        _ => None,
-    };
-
-    let (integration_id, scopes) = match scope_info {
-        Some(pair) => pair,
-        None => return String::new(),
-    };
-
-    format!(
-        r#"
-## Scope expansion
-
-This integration supports write operations that may require additional OAuth
-scopes. If a tool call fails with a **403 "insufficient authentication scopes"**
-error, or if write tools are not listed above, the user needs to grant
-additional scopes. Run:
-
-```bash
-open "https://bisque.tools/integrations?integration={integration_id}&expand_scopes={scopes}"
-```
-
-This auto-triggers the Google OAuth consent screen for the missing scopes.
-Once the user approves, re-run `bisque sync` to refresh available tools, then
-retry the tool call.
-"#,
-        integration_id = integration_id,
-        scopes = scopes,
-    )
-}
-
-fn generate_integration_skill_md(group: &IntegrationGroup) -> String {
-    let tool_rows: String = group
-        .tools
-        .iter()
-        .map(|t| {
-            format!(
-                "| {} | {} | {} |",
-                t.name,
-                t.description,
-                t.access.as_deref().unwrap_or("read")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let plural = if group.tools.len() == 1 { "" } else { "s" };
-    let scope_section = google_scope_expansion_section(group);
-
-    format!(
-        r#"---
-name: {label}
-description: {label} integration via Bisque — {count} tool{plural} available.
----
-
-# {label}
-
-You have access to the user's {label} integration via Bisque.
-
-## Available tools
-
-| Tool | Description | Access |
-|------|-------------|--------|
-{tool_rows}
-
-## Usage
-
-Call any tool above using:
-
-```bash
-bisque call <toolName> --args '<json>'
-```
-
-## Parse the result
-
-Tool call responses are JSON with this shape:
-
-```json
-{{
-  "status": "succeeded",
-  "data": {{}}
-}}
-```
-
-- `status` is `"succeeded"`, `"failed"`, or `"denied"`.
-- `data` contains the raw API response.
-- If `status` is `"failed"`, an `error` string is included.
-- Use `--field data` to extract just the API response data.
-{scope_section}
-## Guidelines
-
-- Summarize the `data` field for the user — do not dump raw JSON
-  unless they ask for details.
-- If a tool returns `"denied"`, tell the user the integration may need
-  re-authorization at bisque.tools.
-- If a tool returns a 403 scope error, use `open` to launch the scope
-  expansion URL as described above, then retry after the user approves.
-- Use `--pretty` if you need human-readable JSON output.
-"#,
-        label = group.label,
-        count = group.tools.len(),
-        plural = plural,
-        tool_rows = tool_rows,
-        scope_section = scope_section,
-    )
-}
-
-fn generate_tools_json(group: &IntegrationGroup) -> String {
-    let tools: Vec<Value> = group
-        .tools
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
-                "access": t.access.as_deref().unwrap_or("read"),
-                "safe": t.safe.unwrap_or(false),
-            })
-        })
-        .collect();
-    serde_json::to_string_pretty(&tools).unwrap() + "\n"
 }
 
 // ─── Output helpers ─────────────────────────────────────────────────

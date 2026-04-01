@@ -6,8 +6,6 @@ mod config;
 
 pub const DEFAULT_BASE_URL: &str = "https://bisque.tools";
 pub const GENERATED_SKILL_PREFIX: &str = "bisque-";
-pub const CORE_SKILL_DIR_NAME: &str = "bisque-api";
-pub const DISCOVERY_SKILL_DIR_NAME: &str = "bisque-available-integrations";
 
 #[derive(Parser)]
 #[command(
@@ -39,10 +37,6 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub pretty: bool,
 
-    /// Output as JSON (tools command)
-    #[arg(long, global = true)]
-    pub json: bool,
-
     /// Print only the summary field
     #[arg(long, global = true)]
     pub summary_only: bool,
@@ -56,27 +50,6 @@ pub struct Cli {
 pub enum Command {
     /// Set up credentials (~/.bisque/config.json)
     Login,
-
-    /// Install SKILL.md + sync for a target agent
-    Init {
-        /// Target agent: claude-code, codex
-        #[arg(long)]
-        agent: Option<String>,
-
-        /// Explicit skills directory
-        #[arg(long)]
-        skills_dir: Option<String>,
-
-        /// Overwrite existing SKILL.md
-        #[arg(long)]
-        force: bool,
-    },
-
-    /// List available tools
-    Tools,
-
-    /// Full bootstrap payload
-    Bootstrap,
 
     /// Execute a tool
     Call {
@@ -92,7 +65,7 @@ pub enum Command {
         invocation_id: Option<String>,
     },
 
-    /// Generate per-integration skill directories
+    /// Sync per-integration skill directories from server
     Sync {
         /// Target agent: claude-code, codex
         #[arg(long)]
