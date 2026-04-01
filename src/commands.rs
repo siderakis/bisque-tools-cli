@@ -2,7 +2,7 @@ use crate::api::{ApiClient, ToolCallResponse};
 use crate::config::{self, BisqueConfig, BisqueProfile};
 use crate::{Cli, Command, GENERATED_SKILL_PREFIX};
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -17,6 +17,17 @@ struct SkillsResponse {
     skills: Vec<RenderedSkill>,
     core_skill: RenderedSkill,
     discovery_skill: Option<RenderedSkill>,
+    #[serde(default)]
+    skills_version: Option<String>,
+    #[serde(default)]
+    cli_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CliState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skills_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,8 +404,11 @@ fn cmd_call(
 
     let response = client.post_tool_call("/v1/tool-call", &body)?;
     match response {
-        ToolCallResponse::Json(result) => {
-            print_result(&result, cli);
+        ToolCallResponse::Json(ref result) => {
+            print_result(result, cli);
+            if let Some(latest) = result.get("cliVersion").and_then(|v| v.as_str()) {
+                check_cli_version(latest);
+            }
         }
         ToolCallResponse::Binary { content_type, data } => {
             let stdout = io::stdout();
@@ -531,6 +545,18 @@ fn cmd_sync(
     if added.is_empty() && updated.is_empty() && removed.is_empty() {
         eprintln!("  (no changes)");
     }
+
+    // Save skills version for staleness detection
+    if let Some(ref version) = response.skills_version {
+        let _ = save_skills_version(version);
+    }
+
+    // Check for CLI update
+    if let Some(ref latest) = response.cli_version {
+        check_cli_version(latest);
+    }
+
+    eprintln!("\nRestart your Claude Code session to pick up the changes.");
 
     Ok(())
 }
@@ -911,6 +937,41 @@ fn mask_str(value: Option<&str>, visible: usize) -> String {
         }
         _ => "(not set)".to_string(),
     }
+}
+
+// ─── Version helpers ────────────────────────────────────────────────
+
+fn check_cli_version(latest: &str) {
+    let current = env!("CARGO_PKG_VERSION");
+    if latest != current {
+        eprintln!(
+            "bisque: a newer version is available (v{latest}). Run `bisque update` and restart your session."
+        );
+    }
+}
+
+fn state_file_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join(".bisque")
+        .join("state.json")
+}
+
+fn load_state() -> Option<CliState> {
+    let content = fs::read_to_string(state_file_path()).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn save_skills_version(version: &str) -> Result<()> {
+    let mut state = load_state().unwrap_or_default();
+    state.skills_version = Some(version.to_string());
+    let json = serde_json::to_string_pretty(&state)?;
+    let path = state_file_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, format!("{json}\n"))?;
+    Ok(())
 }
 
 // ─── Update ─────────────────────────────────────────────────────────
