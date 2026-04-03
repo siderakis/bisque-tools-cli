@@ -41,14 +41,11 @@ struct RenderedSkill {
 
 pub fn run(cli: Cli) -> Result<()> {
     let config = config::load_config();
-    let profile_name =
-        config::resolve_profile_name(cli.profile.as_deref(), &config);
+    let profile_name = config::resolve_profile_name(cli.profile.as_deref(), &config);
 
     // Validate profile exists (skip for login which creates profiles)
     if !matches!(cli.command, Command::Login) {
-        if cli.profile.is_some()
-            && config::get_profile(&config, &profile_name).is_none()
-        {
+        if cli.profile.is_some() && config::get_profile(&config, &profile_name).is_none() {
             bail!(
                 "Profile \"{}\" not found in {}",
                 profile_name,
@@ -60,9 +57,7 @@ pub fn run(cli: Cli) -> Result<()> {
     let profile = config::get_profile(&config, &profile_name).cloned();
 
     match &cli.command {
-        Command::Login => {
-            cmd_login(&cli, &config, &profile_name, profile.as_ref())
-        }
+        Command::Login => cmd_login(&cli, &config, &profile_name, profile.as_ref()),
         Command::Doctor => cmd_doctor(&cli, profile.as_ref()),
         Command::Call {
             tool_name,
@@ -81,9 +76,23 @@ pub fn run(cli: Cli) -> Result<()> {
             agent.as_deref(),
             skills_dir.as_deref(),
         ),
-        Command::Connect { integration } => {
-            cmd_connect(&cli, profile.as_ref(), integration)
-        }
+        Command::Connect { integration } => cmd_connect(&cli, profile.as_ref(), integration),
+        Command::ConfigOptions {
+            provider,
+            fields,
+            context,
+        } => cmd_config_options(
+            &cli,
+            profile.as_ref(),
+            provider,
+            fields.as_deref(),
+            context.as_deref(),
+        ),
+        Command::SaveConfig {
+            provider,
+            key,
+            value,
+        } => cmd_save_config(&cli, profile.as_ref(), provider, key, value),
         Command::Update => cmd_update(&cli, profile.as_ref()),
     }
 }
@@ -96,8 +105,7 @@ fn cmd_login(
     profile_name: &str,
     existing_profile: Option<&BisqueProfile>,
 ) -> Result<()> {
-    let has_manual_flags =
-        cli.user_id.is_some() || cli.api_key.is_some();
+    let has_manual_flags = cli.user_id.is_some() || cli.api_key.is_some();
 
     // If interactive (no flags) and terminal, use browser flow
     if !has_manual_flags && io::stdin().is_terminal() {
@@ -110,12 +118,7 @@ fn cmd_login(
             .unwrap_or(crate::DEFAULT_BASE_URL)
             .trim_end_matches('/');
 
-        return browser_login(
-            base_url,
-            config,
-            profile_name,
-            existing_profile,
-        );
+        return browser_login(base_url, config, profile_name, existing_profile);
     }
 
     // Manual fallback: --user-id / --api-key flags
@@ -139,9 +142,8 @@ fn browser_login(
         .send_string(&session_body)
         .context("Failed to create CLI session")?;
 
-    let body: Value = serde_json::from_str(
-        &resp.into_string().context("Failed to read response")?,
-    )?;
+    let body: Value =
+        serde_json::from_str(&resp.into_string().context("Failed to read response")?)?;
 
     let token = body
         .get("token")
@@ -166,16 +168,12 @@ fn browser_login(
     eprintln!("  {browser_url}");
     eprintln!();
     eprintln!("  Waiting for confirmation... (^C to quit)");
-    let poll_url =
-        format!("{base_url}/api/poll-cli-session?t={token}");
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs(300);
+    let poll_url = format!("{base_url}/api/poll-cli-session?t={token}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
 
     loop {
         if std::time::Instant::now() > deadline {
-            bail!(
-                "Session expired. Run `bisque login` to try again."
-            );
+            bail!("Session expired. Run `bisque login` to try again.");
         }
 
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -209,35 +207,26 @@ fn browser_login(
                     .to_string();
 
                 // Save credentials
-                let mut cfg =
-                    config.clone().unwrap_or_default();
-                let profiles =
-                    cfg.profiles.get_or_insert_with(HashMap::new);
+                let mut cfg = config.clone().unwrap_or_default();
+                let profiles = cfg.profiles.get_or_insert_with(HashMap::new);
                 let profile = BisqueProfile {
                     user_id: Some(user_id.clone()),
                     api_key: Some(api_key.clone()),
                     ..existing_profile.cloned().unwrap_or_default()
                 };
-                profiles
-                    .insert(profile_name.to_string(), profile);
+                profiles.insert(profile_name.to_string(), profile);
 
                 if cfg.active_profile.is_none() {
-                    cfg.active_profile =
-                        Some("default".to_string());
+                    cfg.active_profile = Some("default".to_string());
                 }
 
                 config::save_config(&cfg)?;
                 let path = config::config_path();
-                eprintln!(
-                    "\nDone! Credentials saved to {}",
-                    path.display()
-                );
+                eprintln!("\nDone! Credentials saved to {}", path.display());
                 return Ok(());
             }
             "expired" => {
-                bail!(
-                    "Session expired. Run `bisque login` to try again."
-                );
+                bail!("Session expired. Run `bisque login` to try again.");
             }
             _ => {
                 // still pending, keep polling
@@ -259,14 +248,8 @@ fn manual_login(
     if let Some(existing) = existing_profile {
         if cli.user_id.is_none() && cli.api_key.is_none() {
             eprintln!("Current profile \"{profile_name}\":");
-            eprintln!(
-                "  userId: {}",
-                mask_str(existing.user_id.as_deref(), 8)
-            );
-            eprintln!(
-                "  apiKey: {}",
-                mask_str(existing.api_key.as_deref(), 12)
-            );
+            eprintln!("  userId: {}", mask_str(existing.user_id.as_deref(), 8));
+            eprintln!("  apiKey: {}", mask_str(existing.api_key.as_deref(), 12));
             eprintln!(
                 "  baseUrl: {}",
                 existing
@@ -284,9 +267,7 @@ fn manual_login(
     // Interactive prompts if not provided via flags
     if user_id.is_empty() || api_key.is_empty() {
         if !io::stdin().is_terminal() {
-            bail!(
-                "Non-interactive mode requires --user-id and --api-key flags."
-            );
+            bail!("Non-interactive mode requires --user-id and --api-key flags.");
         }
         eprintln!("Enter credentials (found at bisque.tools/settings):\n");
         if user_id.is_empty() {
@@ -333,11 +314,7 @@ fn manual_login(
         .unwrap_or(crate::DEFAULT_BASE_URL)
         .trim_end_matches('/');
 
-    let client = ApiClient::new(
-        base_url.to_string(),
-        user_id,
-        api_key,
-    );
+    let client = ApiClient::new(base_url.to_string(), user_id, api_key);
 
     match client.get_json("/v1/toolboxes") {
         Ok(result) => {
@@ -350,16 +327,13 @@ fn manual_login(
         }
         Err(e) => {
             eprintln!("  Auth failed: {e}");
-            eprintln!(
-                "  Credentials were saved. Check your user ID and API key."
-            );
+            eprintln!("  Credentials were saved. Check your user ID and API key.");
             std::process::exit(1);
         }
     }
 
     Ok(())
 }
-
 
 // ─── Call ────────────────────────────────────────────────────────────
 
@@ -376,8 +350,7 @@ fn cmd_call(
         cli.base_url.as_deref(),
         profile,
     )?;
-    let client =
-        ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
+    let client = ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
 
     let raw_args = args_json
         .map(String::from)
@@ -386,8 +359,7 @@ fn cmd_call(
     let args: Value = if raw_args.is_empty() {
         Value::Object(serde_json::Map::new())
     } else {
-        let parsed: Value =
-            serde_json::from_str(&raw_args).context("Invalid JSON for args")?;
+        let parsed: Value = serde_json::from_str(&raw_args).context("Invalid JSON for args")?;
         if !parsed.is_object() {
             bail!("Tool args must be a JSON object.");
         }
@@ -421,8 +393,10 @@ fn cmd_call(
                     data.len(),
                     ext,
                 );
-                eprintln!("Pipe to a file to save: bisque call {} --args '...' > output.{}",
-                    tool_name, ext);
+                eprintln!(
+                    "Pipe to a file to save: bisque call {} --args '...' > output.{}",
+                    tool_name, ext
+                );
             } else {
                 // Piped — write raw bytes to stdout
                 let mut out = stdout.lock();
@@ -470,8 +444,7 @@ fn cmd_sync(
         cli.base_url.as_deref(),
         profile,
     )?;
-    let client =
-        ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
+    let client = ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
 
     let detected;
     let effective_agent: Option<&str> = if skills_dir.is_some() {
@@ -488,8 +461,8 @@ fn cmd_sync(
 
     // Fetch pre-rendered skills from server
     let result = client.get_json("/v1/skills")?;
-    let response: SkillsResponse = serde_json::from_value(result)
-        .context("Failed to parse /v1/skills response")?;
+    let response: SkillsResponse =
+        serde_json::from_value(result).context("Failed to parse /v1/skills response")?;
 
     let existing_dirs = find_existing_generated_dirs(&skills_root);
     let mut current_dirs = HashSet::new();
@@ -589,10 +562,7 @@ fn cmd_sync(
 
 // ─── Doctor ─────────────────────────────────────────────────────────
 
-fn cmd_doctor(
-    cli: &Cli,
-    profile: Option<&BisqueProfile>,
-) -> Result<()> {
+fn cmd_doctor(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     let mut ok = true;
 
     // 1. Config file
@@ -623,10 +593,7 @@ fn cmd_doctor(
         println!("  BISQUE_API_KEY: missing");
         ok = false;
     } else {
-        println!(
-            "  BISQUE_API_KEY: {}",
-            mask_str(Some(&auth.api_key), 12)
-        );
+        println!("  BISQUE_API_KEY: {}", mask_str(Some(&auth.api_key), 12));
     }
 
     if auth.user_id.is_empty() || auth.api_key.is_empty() {
@@ -636,11 +603,7 @@ fn cmd_doctor(
 
     // 2. API auth check via /v1/toolboxes
     println!("\nChecking API ({})...", auth.base_url);
-    let client = ApiClient::new(
-        auth.base_url,
-        auth.user_id,
-        auth.api_key,
-    );
+    let client = ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
 
     let result = match client.get_json("/v1/toolboxes") {
         Ok(r) => {
@@ -658,10 +621,7 @@ fn cmd_doctor(
     let mut tool_count = 0;
     let mut provider_count = 0;
 
-    if let Some(providers) = result
-        .get("providers")
-        .and_then(|v| v.as_array())
-    {
+    if let Some(providers) = result.get("providers").and_then(|v| v.as_array()) {
         let mut connected = Vec::new();
         let mut disconnected = Vec::new();
 
@@ -683,10 +643,7 @@ fn cmd_doctor(
                 // Count tools from connected providers
                 if let Some(toolboxes) = provider.get("toolboxes").and_then(|v| v.as_array()) {
                     for tb in toolboxes {
-                        tool_count += tb
-                            .get("toolCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
+                        tool_count += tb.get("toolCount").and_then(|v| v.as_u64()).unwrap_or(0);
                     }
                 }
                 connected.push(label.to_string());
@@ -744,6 +701,75 @@ fn cmd_doctor(
     std::process::exit(if ok { 0 } else { 1 });
 }
 
+// ─── Config Options ────────────────────────────────────────────────
+
+fn cmd_config_options(
+    cli: &Cli,
+    profile: Option<&BisqueProfile>,
+    provider: &str,
+    fields: Option<&str>,
+    context: Option<&str>,
+) -> Result<()> {
+    let auth = config::require_auth(
+        cli.user_id.as_deref(),
+        cli.api_key.as_deref(),
+        cli.base_url.as_deref(),
+        profile,
+    )?;
+    let client = ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
+
+    // Provider IDs are simple kebab-case strings (e.g. "google-analytics"),
+    // field keys are alphanumeric — no encoding needed.
+    let mut path = format!("/v1/config-options?providerId={provider}");
+    if let Some(f) = fields {
+        path.push_str(&format!("&fieldKeys={f}"));
+    }
+    if let Some(c) = context {
+        // Context is JSON — percent-encode it for the query string.
+        let encoded: String = c
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        path.push_str(&format!("&context={encoded}"));
+    }
+
+    let result = client.get_json(&path)?;
+    print_result(&result, cli);
+    Ok(())
+}
+
+// ─── Save Config ───────────────────────────────────────────────────
+
+fn cmd_save_config(
+    cli: &Cli,
+    profile: Option<&BisqueProfile>,
+    provider: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let auth = config::require_auth(
+        cli.user_id.as_deref(),
+        cli.api_key.as_deref(),
+        cli.base_url.as_deref(),
+        profile,
+    )?;
+    let client = ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
+
+    let body = serde_json::json!({
+        "providerId": provider,
+        "values": { key: value }
+    });
+
+    let result = client.post_json("/v1/save-config", &body)?;
+    print_result(&result, cli);
+    Ok(())
+}
+
 // ─── Connect ────────────────────────────────────────────────────────
 
 /// Maps integration status keys to web UI URL paths.
@@ -756,11 +782,7 @@ fn integration_url_path(integration: &str) -> Option<String> {
     Some(format!("/integrations/{integration}"))
 }
 
-fn cmd_connect(
-    cli: &Cli,
-    profile: Option<&BisqueProfile>,
-    integration: &str,
-) -> Result<()> {
+fn cmd_connect(cli: &Cli, profile: Option<&BisqueProfile>, integration: &str) -> Result<()> {
     let env_base_url = std::env::var("BISQUE_BASE_URL").ok();
     let base_url = cli
         .base_url
@@ -773,18 +795,12 @@ fn cmd_connect(
     let path = match integration_url_path(integration) {
         Some(p) => p,
         None => {
-            eprintln!(
-                "Unknown integration: \"{integration}\"\n"
-            );
+            eprintln!("Unknown integration: \"{integration}\"\n");
             eprintln!("Available integrations:");
             eprintln!("  google, klaviyo, mailchimp, meta-ads,");
             eprintln!("  reddit-ads, stripe, tesla, x");
-            eprintln!(
-                "\nGoogle sub-services (google-analytics, google-calendar, etc.)"
-            );
-            eprintln!(
-                "all connect through the Google integration page."
-            );
+            eprintln!("\nGoogle sub-services (google-analytics, google-calendar, etc.)");
+            eprintln!("all connect through the Google integration page.");
             std::process::exit(1);
         }
     };
@@ -808,17 +824,13 @@ fn detect_agent() -> Option<&'static str> {
     None
 }
 
-fn resolve_skills_root(
-    skills_dir: Option<&str>,
-    agent: Option<&str>,
-) -> Result<PathBuf> {
+fn resolve_skills_root(skills_dir: Option<&str>, agent: Option<&str>) -> Result<PathBuf> {
     if let Some(dir) = skills_dir {
         return Ok(PathBuf::from(dir));
     }
 
     if let Some(agent) = agent {
-        let home =
-            dirs::home_dir().context("Cannot determine home directory")?;
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
         return match agent {
             "claude-code" => Ok(home.join(".claude").join("skills")),
             "codex" => {
@@ -828,9 +840,7 @@ fn resolve_skills_root(
                 Ok(codex_home.join("skills"))
             }
             _ => {
-                bail!(
-                    "Unknown agent: {agent}. Use \"claude-code\" or \"codex\"."
-                )
+                bail!("Unknown agent: {agent}. Use \"claude-code\" or \"codex\".")
             }
         };
     }
@@ -843,8 +853,7 @@ fn resolve_skills_root(
         }
     }
 
-    let home =
-        dirs::home_dir().context("Cannot determine home directory")?;
+    let home = dirs::home_dir().context("Cannot determine home directory")?;
     if home.join(".claude").exists() {
         return Ok(home.join(".claude").join("skills"));
     }
@@ -861,8 +870,7 @@ fn find_existing_generated_dirs(skills_root: &Path) -> HashSet<String> {
         for entry in entries.flatten() {
             if let Ok(ft) = entry.file_type() {
                 if ft.is_dir() {
-                    let name =
-                        entry.file_name().to_string_lossy().to_string();
+                    let name = entry.file_name().to_string_lossy().to_string();
                     if name.starts_with(GENERATED_SKILL_PREFIX) {
                         dirs.insert(name);
                     }
@@ -925,10 +933,7 @@ fn print_result(result: &Value, cli: &Cli) {
     print_json(result, cli.pretty);
 }
 
-fn get_nested_field<'a>(
-    value: &'a Value,
-    path: &str,
-) -> Option<&'a Value> {
+fn get_nested_field<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     let mut current = value;
     for part in path.split('.') {
         current = current.get(part)?;
@@ -1010,18 +1015,15 @@ fn cmd_update(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     eprintln!("Checking for updates...");
 
     // Fetch latest release
-    let url = format!(
-        "https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
-    );
+    let url = format!("https://api.github.com/repos/{UPDATE_REPO}/releases/latest");
     let resp = ureq::get(&url)
         .set("Accept", "application/vnd.github+json")
         .set("User-Agent", "bisque-cli")
         .call()
         .context("Failed to check for updates")?;
 
-    let body: Value = serde_json::from_str(
-        &resp.into_string().context("Failed to read response")?,
-    )?;
+    let body: Value =
+        serde_json::from_str(&resp.into_string().context("Failed to read response")?)?;
 
     let tag = body
         .get("tag_name")
@@ -1057,9 +1059,7 @@ fn cmd_update(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
                 }
             })
         })
-        .with_context(|| {
-            format!("No release asset found for {asset_name}")
-        })?;
+        .with_context(|| format!("No release asset found for {asset_name}"))?;
 
     // Download to temp file
     let dl_resp = ureq::get(&download_url)
@@ -1075,8 +1075,8 @@ fn cmd_update(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     // Extract binary from tarball
     let decoder = flate2::read::GzDecoder::new(&tarball[..]);
     let mut archive = tar::Archive::new(decoder);
-    let current_exe = std::env::current_exe()
-        .context("Failed to determine current executable path")?;
+    let current_exe =
+        std::env::current_exe().context("Failed to determine current executable path")?;
 
     let tmp_path = std::env::temp_dir().join("bisque-update.tmp");
 
@@ -1087,12 +1087,9 @@ fn cmd_update(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
             .path()
             .context("Failed to read entry path")?
             .to_path_buf();
-        if path.file_name().and_then(|n| n.to_str()) == Some("bisque")
-        {
-            let mut file = fs::File::create(&tmp_path)
-                .context("Failed to create temp file")?;
-            io::copy(&mut entry, &mut file)
-                .context("Failed to write binary")?;
+        if path.file_name().and_then(|n| n.to_str()) == Some("bisque") {
+            let mut file = fs::File::create(&tmp_path).context("Failed to create temp file")?;
+            io::copy(&mut entry, &mut file).context("Failed to write binary")?;
             found = true;
             break;
         }
@@ -1108,17 +1105,13 @@ fn cmd_update(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            &tmp_path,
-            fs::Permissions::from_mode(0o755),
-        )
-        .context("Failed to set permissions")?;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o755))
+            .context("Failed to set permissions")?;
     }
 
     // Atomic swap
-    fs::rename(&tmp_path, &current_exe).context(
-        "Failed to replace binary. You may need to run with sudo.",
-    )?;
+    fs::rename(&tmp_path, &current_exe)
+        .context("Failed to replace binary. You may need to run with sudo.")?;
 
     eprintln!("Updated to v{latest_version}.");
 
@@ -1132,9 +1125,7 @@ fn cmd_update(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     if !auth.user_id.is_empty() && !auth.api_key.is_empty() {
         eprintln!("\nSyncing skills...");
         let exe = current_exe.to_string_lossy().to_string();
-        let status = std::process::Command::new(&exe)
-            .arg("sync")
-            .status();
+        let status = std::process::Command::new(&exe).arg("sync").status();
         match status {
             Ok(s) if s.success() => {}
             _ => eprintln!("Sync failed — run `bisque sync` manually."),
