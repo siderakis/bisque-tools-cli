@@ -85,6 +85,32 @@ pub enum Command {
         integration: String,
     },
 
+    /// List available config options for an integration (e.g. GA4 properties)
+    ConfigOptions {
+        /// Provider name (e.g., google-analytics, google-firebase)
+        provider: String,
+
+        /// Specific field keys to resolve (comma-separated). Defaults to all.
+        #[arg(long)]
+        fields: Option<String>,
+
+        /// Context JSON for dependent fields (e.g. '{"projectId":"my-project"}')
+        #[arg(long)]
+        context: Option<String>,
+    },
+
+    /// Save a config value for an integration
+    SaveConfig {
+        /// Provider name (e.g., google-analytics)
+        provider: String,
+
+        /// Config field key (e.g., property)
+        key: String,
+
+        /// Config field value (e.g., properties/123456)
+        value: String,
+    },
+
     /// Update bisque to the latest version
     Update,
 }
