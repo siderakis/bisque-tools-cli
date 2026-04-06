@@ -52,18 +52,11 @@ pub fn save_config(config: &BisqueConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn resolve_profile_name(
-    cli_profile: Option<&str>,
-    config: &Option<BisqueConfig>,
-) -> String {
+pub fn resolve_profile_name(cli_profile: Option<&str>, config: &Option<BisqueConfig>) -> String {
     cli_profile
         .map(String::from)
         .or_else(|| std::env::var("BISQUE_PROFILE").ok())
-        .or_else(|| {
-            config
-                .as_ref()
-                .and_then(|c| c.active_profile.clone())
-        })
+        .or_else(|| config.as_ref().and_then(|c| c.active_profile.clone()))
         .unwrap_or_else(|| "default".to_string())
 }
 

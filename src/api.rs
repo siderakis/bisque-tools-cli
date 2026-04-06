@@ -5,10 +5,7 @@ use std::io::Read;
 /// Response from a tool call — either JSON data or raw binary bytes.
 pub enum ToolCallResponse {
     Json(Value),
-    Binary {
-        content_type: String,
-        data: Vec<u8>,
-    },
+    Binary { content_type: String, data: Vec<u8> },
 }
 
 pub struct ApiClient {
@@ -91,9 +88,7 @@ impl ApiClient {
         }
     }
 
-    fn parse_response(
-        result: std::result::Result<ureq::Response, ureq::Error>,
-    ) -> Result<Value> {
+    fn parse_response(result: std::result::Result<ureq::Response, ureq::Error>) -> Result<Value> {
         match result {
             Ok(resp) => {
                 let body = resp.into_string()?;
