@@ -50,7 +50,10 @@ if ! git diff --quiet "$PREFIX/Cargo.toml"; then
 fi
 
 echo "Pushing subtree $PREFIX → $REMOTE_NAME main..."
-git subtree push --prefix="$PREFIX" "$REMOTE_NAME" main
+# Force-push because subtree split generates new commit SHAs that may
+# diverge from the remote. The CLI repo is a pure mirror of the monorepo
+# subtree, so force-push is safe here.
+git push "$REMOTE_NAME" "$(git subtree split --prefix="$PREFIX"):main" --force
 
 echo "Tagging $VERSION on $REMOTE_NAME..."
 # We need to tag on the remote repo's commit, not the monorepo's
