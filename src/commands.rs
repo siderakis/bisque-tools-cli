@@ -596,13 +596,15 @@ fn cmd_doctor(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
         println!("  BISQUE_API_KEY: {}", mask_str(Some(&auth.api_key), 12));
     }
 
+    println!("  Target:        {}", auth.base_url);
+
     if auth.user_id.is_empty() || auth.api_key.is_empty() {
         println!("\nCannot check API connectivity without credentials.");
         std::process::exit(if ok { 0 } else { 1 });
     }
 
     // 2. API auth check via /v1/toolboxes
-    println!("\nChecking API ({})...", auth.base_url);
+    println!("\nChecking API...");
     let client = ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
 
     let result = match client.get_json("/v1/toolboxes") {
