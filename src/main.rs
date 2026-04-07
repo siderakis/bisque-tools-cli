@@ -113,6 +113,9 @@ pub enum Command {
 
     /// Update bisque to the latest version
     Update,
+
+    /// Initialize a .bisque.json workspace config in the current directory
+    Init,
 }
 
 fn main() {

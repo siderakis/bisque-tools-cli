@@ -22,6 +22,8 @@ pub struct BisqueProfile {
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 pub struct AuthInfo {
@@ -52,12 +54,55 @@ pub fn save_config(config: &BisqueConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn resolve_profile_name(cli_profile: Option<&str>, config: &Option<BisqueConfig>) -> String {
-    cli_profile
-        .map(String::from)
-        .or_else(|| std::env::var("BISQUE_PROFILE").ok())
-        .or_else(|| config.as_ref().and_then(|c| c.active_profile.clone()))
-        .unwrap_or_else(|| "default".to_string())
+/// Project-local workspace config (`.bisque.json`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkspaceConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+/// Walk up from `cwd` looking for `.bisque.json`. Returns the parsed config
+/// and the directory it was found in. Returns an error if the file exists but
+/// cannot be read or parsed (to avoid silently falling back to the wrong account).
+pub fn find_workspace_config() -> Result<Option<(WorkspaceConfig, PathBuf)>> {
+    let mut dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    loop {
+        let candidate = dir.join(".bisque.json");
+        if candidate.is_file() {
+            let content = fs::read_to_string(&candidate)
+                .with_context(|| format!("Failed to read {}", candidate.display()))?;
+            let ws: WorkspaceConfig = serde_json::from_str(&content)
+                .with_context(|| format!("Invalid JSON in {}", candidate.display()))?;
+            return Ok(Some((ws, dir)));
+        }
+        if !dir.pop() {
+            return Ok(None);
+        }
+    }
+}
+
+pub fn resolve_profile_name(
+    cli_profile: Option<&str>,
+    config: &Option<BisqueConfig>,
+) -> Result<String> {
+    if let Some(p) = cli_profile {
+        return Ok(p.to_string());
+    }
+    if let Ok(p) = std::env::var("BISQUE_PROFILE") {
+        return Ok(p);
+    }
+    if let Some((ws, _)) = find_workspace_config()? {
+        if let Some(p) = ws.profile {
+            return Ok(p);
+        }
+    }
+    Ok(config
+        .as_ref()
+        .and_then(|c| c.active_profile.clone())
+        .unwrap_or_else(|| "default".to_string()))
 }
 
 pub fn get_profile<'a>(

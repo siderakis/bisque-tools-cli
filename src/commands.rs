@@ -41,7 +41,7 @@ struct RenderedSkill {
 
 pub fn run(cli: Cli) -> Result<()> {
     let config = config::load_config();
-    let profile_name = config::resolve_profile_name(cli.profile.as_deref(), &config);
+    let profile_name = config::resolve_profile_name(cli.profile.as_deref(), &config)?;
 
     // Validate profile exists (skip for login which creates profiles)
     if !matches!(cli.command, Command::Login) {
@@ -209,7 +209,8 @@ fn browser_login(
                 let email = poll_body
                     .get("email")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
+                    .map(String::from)
+                    .or_else(|| existing_profile.and_then(|p| p.email.clone()));
 
                 // Save credentials
                 let mut cfg = config.clone().unwrap_or_default();
