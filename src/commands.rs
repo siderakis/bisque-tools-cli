@@ -94,6 +94,7 @@ pub fn run(cli: Cli) -> Result<()> {
             value,
         } => cmd_save_config(&cli, profile.as_ref(), provider, key, value),
         Command::Update => cmd_update(&cli, profile.as_ref()),
+        Command::Init => cmd_init(&profile_name),
     }
 }
 
@@ -205,6 +206,10 @@ fn browser_login(
                     .and_then(|v| v.as_str())
                     .context("Missing apiKey in approval")?
                     .to_string();
+                let email = poll_body
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
 
                 // Save credentials
                 let mut cfg = config.clone().unwrap_or_default();
@@ -212,6 +217,7 @@ fn browser_login(
                 let profile = BisqueProfile {
                     user_id: Some(user_id.clone()),
                     api_key: Some(api_key.clone()),
+                    email,
                     ..existing_profile.cloned().unwrap_or_default()
                 };
                 profiles.insert(profile_name.to_string(), profile);
@@ -332,6 +338,37 @@ fn manual_login(
         }
     }
 
+    Ok(())
+}
+
+// ─── Init ───────────────────────────────────────────────────────────
+
+fn cmd_init(resolved_profile: &str) -> Result<()> {
+    let profile_name = resolved_profile;
+
+    // Verify profile exists in global config
+    let config = config::load_config();
+    if config::get_profile(&config, profile_name).is_none() {
+        bail!(
+            "Profile \"{}\" not found. Run `bisque login --profile {}` first.",
+            profile_name,
+            profile_name,
+        );
+    }
+
+    let ws = config::WorkspaceConfig {
+        profile: Some(profile_name.to_string()),
+    };
+    let json = serde_json::to_string_pretty(&ws)?;
+    let path = std::env::current_dir()
+        .context("Cannot determine current directory")?
+        .join(".bisque.json");
+
+    fs::write(&path, format!("{json}\n")).context("Failed to write .bisque.json")?;
+    eprintln!("Created {}", path.display());
+    eprintln!("  profile: {profile_name}");
+    eprintln!();
+    eprintln!("Add .bisque.json to your .gitignore — it contains local preferences.");
     Ok(())
 }
 
@@ -515,12 +552,16 @@ fn cmd_sync(
         }
     }
 
-    // Remove stale bisque-* dirs not in response
+    // Remove stale bisque-* dirs not in response.
+    // Safety: skip removal if the server returned zero integration skills —
+    // this likely means a backend error, not that everything was disconnected.
     let mut removed = Vec::new();
-    for dir in &existing_dirs {
-        if !current_dirs.contains(dir) {
-            let _ = fs::remove_dir_all(skills_root.join(dir));
-            removed.push(dir.clone());
+    if all_skills.len() > 1 {
+        for dir in &existing_dirs {
+            if !current_dirs.contains(dir) {
+                let _ = fs::remove_dir_all(skills_root.join(dir));
+                removed.push(dir.clone());
+            }
         }
     }
 
@@ -807,7 +848,16 @@ fn cmd_connect(cli: &Cli, profile: Option<&BisqueProfile>, integration: &str) ->
         }
     };
 
-    let url = format!("{base_url}{path}");
+    let mut url = format!("{base_url}{path}");
+
+    // Append expected_user so the web page can verify the right account is logged in
+    if let Some(email) = profile.and_then(|p| p.email.as_deref()) {
+        let sep = if url.contains('?') { '&' } else { '?' };
+        url = format!("{url}{sep}expected_user={}", urlencoded(email));
+        eprintln!("Account: {email}");
+        eprintln!("  Make sure you're logged in as {email} in your browser.\n");
+    }
+
     eprintln!("Opening {url}");
     open::that(&url).context("Failed to open browser")?;
     Ok(())
@@ -970,6 +1020,21 @@ fn mask_str(value: Option<&str>, visible: usize) -> String {
         }
         _ => "(not set)".to_string(),
     }
+}
+
+fn urlencoded(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
 }
 
 // ─── Version helpers ────────────────────────────────────────────────
