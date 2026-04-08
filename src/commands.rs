@@ -1,6 +1,6 @@
 use crate::api::{ApiClient, ToolCallResponse};
 use crate::config::{self, BisqueConfig, BisqueProfile};
-use crate::{Cli, Command, GENERATED_SKILL_PREFIX};
+use crate::{AccountsAction, Cli, Command, GENERATED_SKILL_PREFIX};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -95,6 +95,7 @@ pub fn run(cli: Cli) -> Result<()> {
         } => cmd_save_config(&cli, profile.as_ref(), provider, key, value),
         Command::Update => cmd_update(&cli, profile.as_ref()),
         Command::Init => cmd_init(&profile_name),
+        Command::Accounts { action } => cmd_accounts(&cli, profile.as_ref(), &action),
     }
 }
 
@@ -370,6 +371,57 @@ fn cmd_init(resolved_profile: &str) -> Result<()> {
     eprintln!("  profile: {profile_name}");
     eprintln!();
     eprintln!("Add .bisque.json to your .gitignore — it contains local preferences.");
+    Ok(())
+}
+
+// ─── Accounts ───────────────────────────────────────────────────────
+
+fn cmd_accounts(
+    cli: &Cli,
+    profile: Option<&BisqueProfile>,
+    action: &AccountsAction,
+) -> Result<()> {
+    let auth = config::require_auth(
+        cli.user_id.as_deref(),
+        cli.api_key.as_deref(),
+        cli.base_url.as_deref(),
+        profile,
+    )?;
+    let client = ApiClient::new(auth.base_url, auth.user_id, auth.api_key);
+
+    match action {
+        AccountsAction::List { provider } => {
+            let result = client.get_json(&format!(
+                "/v1/accounts?provider={}",
+                urlencoded(provider)
+            ))?;
+            print_result(&result, cli);
+        }
+        AccountsAction::SetDefault {
+            provider,
+            account_id,
+        } => {
+            let body = serde_json::json!({
+                "provider": provider,
+                "accountId": account_id,
+            });
+            let result = client.post_json("/v1/accounts/default", &body)?;
+            print_result(&result, cli);
+        }
+        AccountsAction::Describe {
+            provider,
+            account_id,
+            description,
+        } => {
+            let body = serde_json::json!({
+                "provider": provider,
+                "accountId": account_id,
+                "description": description,
+            });
+            let result = client.post_json("/v1/accounts/describe", &body)?;
+            print_result(&result, cli);
+        }
+    }
     Ok(())
 }
 

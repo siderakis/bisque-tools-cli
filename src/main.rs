@@ -116,6 +116,42 @@ pub enum Command {
 
     /// Initialize a .bisque.json workspace config in the current directory
     Init,
+
+    /// Manage linked accounts for an integration
+    Accounts {
+        #[command(subcommand)]
+        action: AccountsAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AccountsAction {
+    /// List linked accounts for a provider
+    List {
+        /// Provider name (e.g., google-gmail, meta-ads)
+        provider: String,
+    },
+
+    /// Set the default account for a provider
+    SetDefault {
+        /// Provider name
+        provider: String,
+
+        /// Account ID to set as default
+        account_id: String,
+    },
+
+    /// Set a description for an account
+    Describe {
+        /// Provider name
+        provider: String,
+
+        /// Account ID
+        account_id: String,
+
+        /// Description of the account's purpose
+        description: String,
+    },
 }
 
 fn main() {
