@@ -122,7 +122,7 @@ pub fn run(cli: Cli) -> Result<()> {
             value,
         } => cmd_save_config(&cli, profile.as_ref(), provider, key, value),
         Command::Update => cmd_update(&cli, profile.as_ref()),
-        Command::Init => cmd_init(&profile_name),
+        Command::Init => cmd_init(cli.profile.as_deref(), &profile_name),
         Command::Accounts { action } => cmd_accounts(&cli, profile.as_ref(), &action),
     }
 }
@@ -259,6 +259,15 @@ fn browser_login(
                 config::save_config(&cfg)?;
                 let path = config::config_path();
                 eprintln!("\nDone! Credentials saved to {}", path.display());
+
+                // Suggest next steps
+                if config::find_workspace_config().ok().flatten().is_none() {
+                    eprintln!("\nNext steps:");
+                    eprintln!("  bisque init       Set this profile for the current directory");
+                    eprintln!("  bisque connect     Connect an integration");
+                    eprintln!("  bisque sync        Sync tools to Claude Code");
+                }
+
                 return Ok(());
             }
             "expired" => {
@@ -368,17 +377,83 @@ fn manual_login(
         }
     }
 
+    // Suggest next steps
+    if config::find_workspace_config().ok().flatten().is_none() {
+        eprintln!("\nNext steps:");
+        eprintln!("  bisque init       Set this profile for the current directory");
+        eprintln!("  bisque connect     Connect an integration");
+        eprintln!("  bisque sync        Sync tools to Claude Code");
+    }
+
     Ok(())
 }
 
 // ─── Init ───────────────────────────────────────────────────────────
 
-fn cmd_init(resolved_profile: &str) -> Result<()> {
-    let profile_name = resolved_profile;
-
-    // Verify profile exists in global config
+fn cmd_init(cli_profile: Option<&str>, resolved_profile: &str) -> Result<()> {
     let config = config::load_config();
-    if config::get_profile(&config, profile_name).is_none() {
+    let profiles: Vec<String> = config
+        .as_ref()
+        .and_then(|c| c.profiles.as_ref())
+        .map(|p| {
+            let mut names: Vec<String> = p.keys().cloned().collect();
+            names.sort();
+            names
+        })
+        .unwrap_or_default();
+
+    if profiles.is_empty() {
+        bail!("No profiles found. Run `bisque login` first.");
+    }
+
+    // If --profile was explicitly passed, use it directly
+    // If there's only one profile, use it without asking
+    // Otherwise, prompt interactively
+    let profile_name = if cli_profile.is_some() {
+        resolved_profile.to_string()
+    } else if profiles.len() == 1 {
+        profiles[0].clone()
+    } else if io::stdin().is_terminal() {
+        // Interactive: show numbered list and let user pick
+        eprintln!("Available profiles:\n");
+        for (i, name) in profiles.iter().enumerate() {
+            let email = config
+                .as_ref()
+                .and_then(|c| c.profiles.as_ref())
+                .and_then(|p| p.get(name))
+                .and_then(|p| p.email.as_deref())
+                .unwrap_or("");
+            let marker = if name == resolved_profile { " (active)" } else { "" };
+            if email.is_empty() {
+                eprintln!("  {}) {name}{marker}", i + 1);
+            } else {
+                eprintln!("  {}) {name} — {email}{marker}", i + 1);
+            }
+        }
+        eprintln!();
+
+        let choice = prompt(&format!("Profile for this directory [{}]: ", resolved_profile))?;
+        let choice = choice.trim();
+
+        if choice.is_empty() {
+            resolved_profile.to_string()
+        } else if let Ok(num) = choice.parse::<usize>() {
+            if num >= 1 && num <= profiles.len() {
+                profiles[num - 1].clone()
+            } else {
+                bail!("Invalid selection: {num}");
+            }
+        } else if profiles.contains(&choice.to_string()) {
+            choice.to_string()
+        } else {
+            bail!("Unknown profile: \"{choice}\"");
+        }
+    } else {
+        resolved_profile.to_string()
+    };
+
+    // Verify profile exists
+    if config::get_profile(&config, &profile_name).is_none() {
         bail!(
             "Profile \"{}\" not found. Run `bisque login --profile {}` first.",
             profile_name,
