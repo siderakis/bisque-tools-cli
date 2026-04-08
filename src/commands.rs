@@ -85,7 +85,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
     match &cli.command {
         Command::Login => cmd_login(&cli, &config, &profile_name, profile.as_ref()),
-        Command::Doctor => cmd_doctor(&cli, profile.as_ref()),
+        Command::Doctor => cmd_doctor(&cli, profile.as_ref(), &profile_name),
         Command::Call {
             tool_name,
             args_json,
@@ -745,10 +745,10 @@ fn cmd_sync(
 
 // ─── Doctor ─────────────────────────────────────────────────────────
 
-fn cmd_doctor(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
+fn cmd_doctor(cli: &Cli, profile: Option<&BisqueProfile>, profile_name: &str) -> Result<()> {
     let mut ok = true;
 
-    // 1. Config file
+    // 1. Config file & profile
     println!("Checking credentials...");
     let config_path = config::config_path();
     if config_path.exists() {
@@ -757,6 +757,8 @@ fn cmd_doctor(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
         println!("  config NOT found at {}", config_path.display());
         ok = false;
     }
+
+    println!("  profile:       {profile_name}");
 
     let auth = config::resolve_auth(
         cli.user_id.as_deref(),
@@ -781,6 +783,14 @@ fn cmd_doctor(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
 
     println!("  Target:        {}", auth.base_url);
 
+    // Show workspace config if present
+    if let Ok(Some((_, ws_dir))) = config::find_workspace_config() {
+        println!(
+            "  workspace:     {} (.bisque.json)",
+            ws_dir.display()
+        );
+    }
+
     if auth.user_id.is_empty() || auth.api_key.is_empty() {
         println!("\nCannot check API connectivity without credentials.");
         std::process::exit(if ok { 0 } else { 1 });
@@ -802,7 +812,7 @@ fn cmd_doctor(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
     };
 
     // 3. Integration status from /v1/toolboxes response
-    println!("\nIntegrations:");
+    println!("\nIntegrations (profile: {profile_name}):");
     let mut tool_count = 0;
     let mut provider_count = 0;
 
@@ -855,19 +865,44 @@ fn cmd_doctor(cli: &Cli, profile: Option<&BisqueProfile>) -> Result<()> {
         }
     }
 
-    // 4. Stale generated dirs
+    // 4. Cross-profile state from state.json files on disk
     if let Ok(skills_root) = resolve_skills_root(None, None) {
         let existing_dirs = find_existing_generated_dirs(&skills_root);
+        let non_state_dirs = ["bisque-api", "bisque-available-integrations"];
 
-        // Expected dirs: bisque-api + one per connected provider
-        // We can't know exact dir names without calling /v1/skills,
-        // so just report dirs that exist on disk for awareness
-        if !existing_dirs.is_empty() {
-            println!("\n  Skill directories on disk:");
-            for name in &existing_dirs {
-                println!("    {name}");
+        // Collect other profiles that have integrations connected
+        let mut other_profiles: HashMap<String, Vec<String>> = HashMap::new();
+        for dir in &existing_dirs {
+            if non_state_dirs.contains(&dir.as_str()) {
+                continue;
             }
-            println!("  Run `bisque sync` to refresh.");
+            let dir_path = skills_root.join(dir);
+            if let Some(state) = load_skill_state(&dir_path) {
+                for (pname, pstate) in &state.profiles {
+                    if pname == profile_name || !pstate.connected {
+                        continue;
+                    }
+                    let integration = dir
+                        .strip_prefix(GENERATED_SKILL_PREFIX)
+                        .unwrap_or(dir)
+                        .to_string();
+                    other_profiles
+                        .entry(pname.clone())
+                        .or_default()
+                        .push(integration);
+                }
+            }
+        }
+
+        if !other_profiles.is_empty() {
+            println!("\nOther profiles on disk:");
+            let mut profiles: Vec<_> = other_profiles.into_iter().collect();
+            profiles.sort_by(|a, b| a.0.cmp(&b.0));
+            for (pname, mut integrations) in profiles {
+                integrations.sort();
+                let names = integrations.join(", ");
+                println!("  {pname}: {names}");
+            }
         }
     }
 
