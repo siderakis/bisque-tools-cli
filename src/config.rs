@@ -2,13 +2,12 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BisqueConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profiles: Option<HashMap<String, BisqueProfile>>,
 }
@@ -88,21 +87,109 @@ pub fn resolve_profile_name(
     cli_profile: Option<&str>,
     config: &Option<BisqueConfig>,
 ) -> Result<String> {
+    // 1. Explicit flag
     if let Some(p) = cli_profile {
         return Ok(p.to_string());
     }
+    // 2. Environment variable
     if let Ok(p) = std::env::var("BISQUE_PROFILE") {
         return Ok(p);
     }
+    // 3. Workspace config (.bisque.json)
     if let Some((ws, _)) = find_workspace_config()? {
         if let Some(p) = ws.profile {
             return Ok(p);
         }
     }
-    Ok(config
+    // 4. If exactly one profile exists, use it
+    let profile_names = sorted_profile_names(config);
+    match profile_names.len() {
+        0 => Ok("default".to_string()),
+        1 => Ok(profile_names[0].clone()),
+        _ => {
+            // Multiple profiles: prompt interactively or error
+            if io::stdin().is_terminal() {
+                interactive_profile_picker(config, &profile_names)
+            } else {
+                bail!(
+                    "Multiple profiles found ({}). Specify one with --profile or BISQUE_PROFILE.",
+                    profile_names.join(", ")
+                );
+            }
+        }
+    }
+}
+
+/// Return sorted profile names from config, or empty vec.
+pub fn sorted_profile_names(config: &Option<BisqueConfig>) -> Vec<String> {
+    config
         .as_ref()
-        .and_then(|c| c.active_profile.clone())
-        .unwrap_or_else(|| "default".to_string()))
+        .and_then(|c| c.profiles.as_ref())
+        .map(|p| {
+            let mut names: Vec<String> = p.keys().cloned().collect();
+            names.sort();
+            names
+        })
+        .unwrap_or_default()
+}
+
+/// Interactive arrow-key profile picker for terminals.
+fn interactive_profile_picker(
+    config: &Option<BisqueConfig>,
+    names: &[String],
+) -> Result<String> {
+    eprintln!("Multiple profiles found. Select one:\n");
+    for (i, name) in names.iter().enumerate() {
+        let email = config
+            .as_ref()
+            .and_then(|c| c.profiles.as_ref())
+            .and_then(|p| p.get(name))
+            .and_then(|p| p.email.as_deref())
+            .unwrap_or("");
+        if email.is_empty() {
+            eprintln!("  {}) {name}", i + 1);
+        } else {
+            eprintln!("  {}) {name} — {email}", i + 1);
+        }
+    }
+    eprintln!();
+
+    eprint!("Profile [1-{}]: ", names.len());
+    io::stderr().flush().ok();
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read input")?;
+    let input = input.trim();
+
+    // Accept number or name
+    if let Ok(num) = input.parse::<usize>() {
+        if num >= 1 && num <= names.len() {
+            return Ok(names[num - 1].clone());
+        }
+        bail!("Invalid selection: {num}");
+    }
+    if names.contains(&input.to_string()) {
+        return Ok(input.to_string());
+    }
+    bail!("Unknown profile: \"{input}\"");
+}
+
+/// Find a profile name that already has the given user ID.
+pub fn find_profile_by_user_id(config: &Option<BisqueConfig>, user_id: &str) -> Option<String> {
+    config
+        .as_ref()
+        .and_then(|c| c.profiles.as_ref())
+        .and_then(|profiles| {
+            profiles.iter().find_map(|(name, p)| {
+                if p.user_id.as_deref() == Some(user_id) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+        })
 }
 
 pub fn get_profile<'a>(

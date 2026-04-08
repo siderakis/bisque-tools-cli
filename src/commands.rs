@@ -241,20 +241,31 @@ fn browser_login(
                     .map(String::from)
                     .or_else(|| existing_profile.and_then(|p| p.email.clone()));
 
-                // Save credentials
+                // Check if this user ID already exists under a different profile
                 let mut cfg = config.clone().unwrap_or_default();
+                let target_profile = config::find_profile_by_user_id(&Some(cfg.clone()), &user_id)
+                    .filter(|name| name != profile_name)
+                    .unwrap_or_else(|| profile_name.to_string());
+
+                if target_profile != profile_name {
+                    eprintln!(
+                        "\nThis account is already configured as profile \"{target_profile}\"."
+                    );
+                    eprintln!("Updating credentials for profile \"{target_profile}\".");
+                }
+
+                // Save credentials
                 let profiles = cfg.profiles.get_or_insert_with(HashMap::new);
+                let base = profiles.get(&target_profile).cloned()
+                    .or_else(|| existing_profile.cloned())
+                    .unwrap_or_default();
                 let profile = BisqueProfile {
                     user_id: Some(user_id.clone()),
                     api_key: Some(api_key.clone()),
                     email,
-                    ..existing_profile.cloned().unwrap_or_default()
+                    ..base
                 };
-                profiles.insert(profile_name.to_string(), profile);
-
-                if cfg.active_profile.is_none() {
-                    cfg.active_profile = Some("default".to_string());
-                }
+                profiles.insert(target_profile, profile);
 
                 config::save_config(&cfg)?;
                 let path = config::config_path();
@@ -287,7 +298,6 @@ fn manual_login(
     existing_profile: Option<&BisqueProfile>,
 ) -> Result<()> {
     let mut config = config.clone().unwrap_or_default();
-    let profiles = config.profiles.get_or_insert_with(HashMap::new);
 
     // Show existing profile if present and no flags given
     if let Some(existing) = existing_profile {
@@ -327,23 +337,35 @@ fn manual_login(
         bail!("Both user ID and API key are required.");
     }
 
-    // Update profile
+    // Check if this user ID already exists under a different profile
+    let target_profile =
+        config::find_profile_by_user_id(&Some(config.clone()), &user_id)
+            .filter(|name| name != profile_name)
+            .unwrap_or_else(|| profile_name.to_string());
+
+    if target_profile != profile_name {
+        eprintln!(
+            "\nThis account is already configured as profile \"{target_profile}\"."
+        );
+        eprintln!("Updating credentials for profile \"{target_profile}\".");
+    }
+
+    let profiles = config.profiles.get_or_insert_with(HashMap::new);
+    let base = profiles.get(&target_profile).cloned()
+        .or_else(|| existing_profile.cloned())
+        .unwrap_or_default();
     let profile = BisqueProfile {
         user_id: Some(user_id.clone()),
         api_key: Some(api_key.clone()),
-        ..existing_profile.cloned().unwrap_or_default()
+        ..base
     };
-    profiles.insert(profile_name.to_string(), profile);
-
-    if config.active_profile.is_none() {
-        config.active_profile = Some("default".to_string());
-    }
+    profiles.insert(target_profile.clone(), profile);
 
     config::save_config(&config)?;
     let path = config::config_path();
     eprint!("\nCredentials saved to {}", path.display());
-    if profile_name != "default" {
-        eprintln!(" (profile: {profile_name})");
+    if target_profile != "default" {
+        eprintln!(" (profile: {target_profile})");
     } else {
         eprintln!();
     }
@@ -392,15 +414,7 @@ fn manual_login(
 
 fn cmd_init(cli_profile: Option<&str>, resolved_profile: &str) -> Result<()> {
     let config = config::load_config();
-    let profiles: Vec<String> = config
-        .as_ref()
-        .and_then(|c| c.profiles.as_ref())
-        .map(|p| {
-            let mut names: Vec<String> = p.keys().cloned().collect();
-            names.sort();
-            names
-        })
-        .unwrap_or_default();
+    let profiles = config::sorted_profile_names(&config);
 
     if profiles.is_empty() {
         bail!("No profiles found. Run `bisque login` first.");
@@ -423,11 +437,10 @@ fn cmd_init(cli_profile: Option<&str>, resolved_profile: &str) -> Result<()> {
                 .and_then(|p| p.get(name))
                 .and_then(|p| p.email.as_deref())
                 .unwrap_or("");
-            let marker = if name == resolved_profile { " (active)" } else { "" };
             if email.is_empty() {
-                eprintln!("  {}) {name}{marker}", i + 1);
+                eprintln!("  {}) {name}", i + 1);
             } else {
-                eprintln!("  {}) {name} — {email}{marker}", i + 1);
+                eprintln!("  {}) {name} — {email}", i + 1);
             }
         }
         eprintln!();
