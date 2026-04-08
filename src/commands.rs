@@ -21,6 +21,33 @@ struct SkillsResponse {
     skills_version: Option<String>,
     #[serde(default)]
     cli_version: Option<String>,
+    #[serde(default)]
+    provider_states: HashMap<String, ProfileState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileState {
+    connected: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accounts: Option<Vec<AccountState>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountState {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default)]
+    is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkillState {
+    profiles: HashMap<String, ProfileState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -73,6 +100,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Sync { agent, skills_dir } => cmd_sync(
             &cli,
             profile.as_ref(),
+            &profile_name,
             agent.as_deref(),
             skills_dir.as_deref(),
         ),
@@ -525,6 +553,7 @@ fn mime_to_ext(content_type: &str) -> &str {
 fn cmd_sync(
     cli: &Cli,
     profile: Option<&BisqueProfile>,
+    profile_name: &str,
     agent: Option<&str>,
     skills_dir: Option<&str>,
 ) -> Result<()> {
@@ -605,11 +634,75 @@ fn cmd_sync(
         }
     }
 
-    // Remove stale bisque-* dirs not in response
+    // ── Write state.json per integration skill ──────────────────────
+    let non_state_dirs = ["bisque-api", "bisque-available-integrations"];
+    if !response.provider_states.is_empty() {
+        // Write state for connected providers (skills in the response)
+        for skill in &all_skills {
+            if non_state_dirs.contains(&skill.directory_name.as_str()) {
+                continue;
+            }
+            let provider_id = skill
+                .directory_name
+                .strip_prefix(GENERATED_SKILL_PREFIX)
+                .unwrap_or(&skill.directory_name);
+            if let Some(ps) = response.provider_states.get(provider_id) {
+                let dir_path = skills_root.join(&skill.directory_name);
+                let existing = load_skill_state(&dir_path);
+                let merged = merge_profile_state(existing, profile_name, ps.clone());
+                let _ = save_skill_state(&dir_path, &merged);
+            }
+        }
+
+        // Mark disconnected providers in state.json (for dirs kept from other profiles)
+        for (provider_id, ps) in &response.provider_states {
+            if ps.connected {
+                continue;
+            }
+            let dir_name = format!("{GENERATED_SKILL_PREFIX}{provider_id}");
+            let dir_path = skills_root.join(&dir_name);
+            if dir_path.exists() && !non_state_dirs.contains(&dir_name.as_str()) {
+                let existing = load_skill_state(&dir_path);
+                let merged =
+                    merge_profile_state(existing, profile_name, ps.clone());
+                let _ = save_skill_state(&dir_path, &merged);
+            }
+        }
+    }
+
+    // ── Profile-aware deletion ────────────────────────────────────────
     let mut removed = Vec::new();
     for dir in &existing_dirs {
-        if !current_dirs.contains(dir) {
-            let _ = fs::remove_dir_all(skills_root.join(dir));
+        if current_dirs.contains(dir) {
+            continue;
+        }
+        let dir_path = skills_root.join(dir);
+
+        // Non-state dirs (bisque-api, bisque-available-integrations) don't
+        // have state.json — delete them normally when absent from response.
+        if non_state_dirs.contains(&dir.as_str()) {
+            let _ = fs::remove_dir_all(&dir_path);
+            removed.push(dir.clone());
+            continue;
+        }
+
+        // Mark current profile as disconnected in state.json
+        let state = load_skill_state(&dir_path);
+        let merged = merge_profile_state(
+            state,
+            profile_name,
+            ProfileState {
+                connected: false,
+                accounts: None,
+            },
+        );
+
+        if any_profile_connected(&merged) {
+            // Another profile still uses this — keep the directory, update state
+            let _ = save_skill_state(&dir_path, &merged);
+        } else {
+            // No profile needs it — safe to delete
+            let _ = fs::remove_dir_all(&dir_path);
             removed.push(dir.clone());
         }
     }
@@ -980,6 +1073,37 @@ fn find_existing_generated_dirs(skills_root: &Path) -> HashSet<String> {
         }
     }
     dirs
+}
+
+// ─── State helpers ─────────────────────────────────────────────────
+
+fn load_skill_state(dir: &Path) -> Option<SkillState> {
+    let content = fs::read_to_string(dir.join("state.json")).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn save_skill_state(dir: &Path, state: &SkillState) -> Result<()> {
+    let json = serde_json::to_string_pretty(state)?;
+    fs::write(dir.join("state.json"), format!("{json}\n"))?;
+    Ok(())
+}
+
+fn merge_profile_state(
+    existing: Option<SkillState>,
+    profile_name: &str,
+    new_state: ProfileState,
+) -> SkillState {
+    let mut state = existing.unwrap_or(SkillState {
+        profiles: HashMap::new(),
+    });
+    state
+        .profiles
+        .insert(profile_name.to_string(), new_state);
+    state
+}
+
+fn any_profile_connected(state: &SkillState) -> bool {
+    state.profiles.values().any(|p| p.connected)
 }
 
 // ─── Output helpers ─────────────────────────────────────────────────
