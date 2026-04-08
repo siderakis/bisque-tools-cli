@@ -553,16 +553,12 @@ fn cmd_sync(
         }
     }
 
-    // Remove stale bisque-* dirs not in response.
-    // Safety: skip removal if the server returned zero integration skills —
-    // this likely means a backend error, not that everything was disconnected.
+    // Remove stale bisque-* dirs not in response
     let mut removed = Vec::new();
-    if all_skills.len() > 1 {
-        for dir in &existing_dirs {
-            if !current_dirs.contains(dir) {
-                let _ = fs::remove_dir_all(skills_root.join(dir));
-                removed.push(dir.clone());
-            }
+    for dir in &existing_dirs {
+        if !current_dirs.contains(dir) {
+            let _ = fs::remove_dir_all(skills_root.join(dir));
+            removed.push(dir.clone());
         }
     }
 
