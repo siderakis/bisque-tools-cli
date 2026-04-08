@@ -101,10 +101,10 @@ pub fn resolve_profile_name(
             return Ok(p);
         }
     }
-    // 4. If exactly one profile exists, use it
+    // 4. If exactly one profile exists, use it; if none, let the caller decide
     let profile_names = sorted_profile_names(config);
     match profile_names.len() {
-        0 => Ok("default".to_string()),
+        0 => Ok(String::new()),
         1 => Ok(profile_names[0].clone()),
         _ => {
             // Multiple profiles: prompt interactively or error

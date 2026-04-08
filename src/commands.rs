@@ -241,17 +241,23 @@ fn browser_login(
                     .map(String::from)
                     .or_else(|| existing_profile.and_then(|p| p.email.clone()));
 
-                // Check if this user ID already exists under a different profile
+                // Determine target profile name
                 let mut cfg = config.clone().unwrap_or_default();
-                let target_profile = config::find_profile_by_user_id(&Some(cfg.clone()), &user_id)
-                    .filter(|name| name != profile_name)
-                    .unwrap_or_else(|| profile_name.to_string());
+                let effective_name = if profile_name.is_empty() {
+                    // No profiles yet — use email as the profile name
+                    email.clone().unwrap_or_else(|| user_id.clone())
+                } else {
+                    profile_name.to_string()
+                };
+                let duplicate = config::find_profile_by_user_id(&Some(cfg.clone()), &user_id)
+                    .filter(|name| name != &effective_name);
+                let target_profile = duplicate.clone().unwrap_or(effective_name);
 
-                if target_profile != profile_name {
+                if let Some(ref dup) = duplicate {
                     eprintln!(
-                        "\nThis account is already configured as profile \"{target_profile}\"."
+                        "\nThis account is already configured as profile \"{dup}\"."
                     );
-                    eprintln!("Updating credentials for profile \"{target_profile}\".");
+                    eprintln!("Updating credentials for profile \"{dup}\".");
                 }
 
                 // Save credentials
@@ -337,17 +343,23 @@ fn manual_login(
         bail!("Both user ID and API key are required.");
     }
 
-    // Check if this user ID already exists under a different profile
-    let target_profile =
-        config::find_profile_by_user_id(&Some(config.clone()), &user_id)
-            .filter(|name| name != profile_name)
-            .unwrap_or_else(|| profile_name.to_string());
+    // Determine target profile name
+    let effective_name = if profile_name.is_empty() {
+        user_id.clone()
+    } else {
+        profile_name.to_string()
+    };
 
-    if target_profile != profile_name {
+    // Check if this user ID already exists under a different profile
+    let duplicate = config::find_profile_by_user_id(&Some(config.clone()), &user_id)
+        .filter(|name| name != &effective_name);
+    let target_profile = duplicate.clone().unwrap_or(effective_name);
+
+    if let Some(ref dup) = duplicate {
         eprintln!(
-            "\nThis account is already configured as profile \"{target_profile}\"."
+            "\nThis account is already configured as profile \"{dup}\"."
         );
-        eprintln!("Updating credentials for profile \"{target_profile}\".");
+        eprintln!("Updating credentials for profile \"{dup}\".");
     }
 
     let profiles = config.profiles.get_or_insert_with(HashMap::new);
@@ -363,12 +375,7 @@ fn manual_login(
 
     config::save_config(&config)?;
     let path = config::config_path();
-    eprint!("\nCredentials saved to {}", path.display());
-    if target_profile != "default" {
-        eprintln!(" (profile: {target_profile})");
-    } else {
-        eprintln!();
-    }
+    eprintln!("\nCredentials saved to {} (profile: {target_profile})", path.display());
 
     // Verify auth
     eprintln!("\nVerifying credentials...");
@@ -825,7 +832,9 @@ fn cmd_sync(
     }
 
     if !added.is_empty() || !updated.is_empty() || !removed.is_empty() {
-        eprintln!("\nRestart your Claude Code session to pick up the changes.");
+        if !io::stderr().is_terminal() {
+            eprintln!("\nRestart your Claude Code session to pick up the changes.");
+        }
     }
 
     Ok(())
@@ -1335,9 +1344,22 @@ fn urlencoded(s: &str) -> String {
 
 // ─── Version helpers ────────────────────────────────────────────────
 
+fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = v.split('.').collect();
+    if parts.len() == 3 {
+        Some((parts[0].parse().ok()?, parts[1].parse().ok()?, parts[2].parse().ok()?))
+    } else {
+        None
+    }
+}
+
 fn check_cli_version(latest: &str) {
     let current = env!("CARGO_PKG_VERSION");
-    if latest != current {
+    let is_newer = match (parse_version(latest), parse_version(current)) {
+        (Some(l), Some(c)) => l > c,
+        _ => latest != current,
+    };
+    if is_newer {
         eprintln!(
             "bisque: a newer version is available (v{latest}). Run `bisque update` and restart your session."
         );
