@@ -84,7 +84,8 @@ pub fn run(cli: Cli) -> Result<()> {
     let profile = config::get_profile(&config, &profile_name).cloned();
 
     match &cli.command {
-        Command::Login => cmd_login(&cli, &config, &profile_name, profile.as_ref()),
+        Command::Login => cmd_login(&cli, &config, &profile_name, profile.as_ref(), false)
+            .map(|_| ()),
         Command::Doctor => cmd_doctor(&cli, profile.as_ref(), &profile_name),
         Command::Call {
             tool_name,
@@ -122,7 +123,7 @@ pub fn run(cli: Cli) -> Result<()> {
             value,
         } => cmd_save_config(&cli, profile.as_ref(), provider, key, value),
         Command::Update => cmd_update(&cli, profile.as_ref()),
-        Command::Init => cmd_init(cli.profile.as_deref(), &profile_name),
+        Command::Init => cmd_init(&cli, &config, cli.profile.as_deref(), &profile_name),
         Command::Accounts { action } => cmd_accounts(&cli, profile.as_ref(), &action),
     }
 }
@@ -134,7 +135,8 @@ fn cmd_login(
     config: &Option<BisqueConfig>,
     profile_name: &str,
     existing_profile: Option<&BisqueProfile>,
-) -> Result<()> {
+    suppress_next_steps: bool,
+) -> Result<String> {
     let has_manual_flags = cli.user_id.is_some() || cli.api_key.is_some();
 
     // If interactive (no flags) and terminal, use browser flow
@@ -148,11 +150,17 @@ fn cmd_login(
             .unwrap_or(crate::DEFAULT_BASE_URL)
             .trim_end_matches('/');
 
-        return browser_login(base_url, config, profile_name, existing_profile);
+        return browser_login(
+            base_url,
+            config,
+            profile_name,
+            existing_profile,
+            suppress_next_steps,
+        );
     }
 
     // Manual fallback: --user-id / --api-key flags
-    manual_login(cli, config, profile_name, existing_profile)
+    manual_login(cli, config, profile_name, existing_profile, suppress_next_steps)
 }
 
 fn browser_login(
@@ -160,7 +168,8 @@ fn browser_login(
     config: &Option<BisqueConfig>,
     profile_name: &str,
     existing_profile: Option<&BisqueProfile>,
-) -> Result<()> {
+    suppress_next_steps: bool,
+) -> Result<String> {
     // 1. Create session
     let url = format!("{base_url}/api/create-cli-session");
     let session_body = match hostname::get() {
@@ -271,21 +280,23 @@ fn browser_login(
                     email,
                     ..base
                 };
-                profiles.insert(target_profile, profile);
+                profiles.insert(target_profile.clone(), profile);
 
                 config::save_config(&cfg)?;
                 let path = config::config_path();
                 eprintln!("\nDone! Credentials saved to {}", path.display());
 
                 // Suggest next steps
-                if config::find_workspace_config().ok().flatten().is_none() {
+                if !suppress_next_steps
+                    && config::find_workspace_config().ok().flatten().is_none()
+                {
                     eprintln!("\nNext steps:");
                     eprintln!("  bisque init       Set this profile for the current directory");
                     eprintln!("  bisque connect     Connect an integration");
                     eprintln!("  bisque sync        Sync tools to Claude Code");
                 }
 
-                return Ok(());
+                return Ok(target_profile);
             }
             "expired" => {
                 bail!("Session expired. Run `bisque login` to try again.");
@@ -302,7 +313,8 @@ fn manual_login(
     config: &Option<BisqueConfig>,
     profile_name: &str,
     existing_profile: Option<&BisqueProfile>,
-) -> Result<()> {
+    suppress_next_steps: bool,
+) -> Result<String> {
     let mut config = config.clone().unwrap_or_default();
 
     // Show existing profile if present and no flags given
@@ -407,35 +419,49 @@ fn manual_login(
     }
 
     // Suggest next steps
-    if config::find_workspace_config().ok().flatten().is_none() {
+    if !suppress_next_steps
+        && config::find_workspace_config().ok().flatten().is_none()
+    {
         eprintln!("\nNext steps:");
         eprintln!("  bisque init       Set this profile for the current directory");
         eprintln!("  bisque connect     Connect an integration");
         eprintln!("  bisque sync        Sync tools to Claude Code");
     }
 
-    Ok(())
+    Ok(target_profile)
 }
 
 // ─── Init ───────────────────────────────────────────────────────────
 
-fn cmd_init(cli_profile: Option<&str>, resolved_profile: &str) -> Result<()> {
-    let config = config::load_config();
-    let profiles = config::sorted_profile_names(&config);
+fn cmd_init(
+    cli: &Cli,
+    config: &Option<BisqueConfig>,
+    cli_profile: Option<&str>,
+    resolved_profile: &str,
+) -> Result<()> {
+    let profiles = config::sorted_profile_names(config);
+    let is_tty = io::stdin().is_terminal();
 
+    // Case: no profiles yet → log in inline.
     if profiles.is_empty() {
-        bail!("No profiles found. Run `bisque login` first.");
+        if !is_tty {
+            bail!("No profiles found. Run `bisque login` first.");
+        }
+        eprintln!("No profiles found. Let's log in first.\n");
+        let target = cli_profile.unwrap_or("");
+        let saved = cmd_login(cli, config, target, None, true)?;
+        return write_workspace_config(&saved);
     }
 
-    // If --profile was explicitly passed, use it directly
-    // If there's only one profile, use it without asking
-    // Otherwise, prompt interactively
+    // Determine which profile to target.
+    // If --profile was explicitly passed, use it directly.
+    // If there's only one profile, use it without asking.
+    // Otherwise, prompt interactively (with an "add new account" option).
     let profile_name = if cli_profile.is_some() {
         resolved_profile.to_string()
     } else if profiles.len() == 1 {
         profiles[0].clone()
-    } else if io::stdin().is_terminal() {
-        // Interactive: show numbered list and let user pick
+    } else if is_tty {
         eprintln!("Available profiles:\n");
         for (i, name) in profiles.iter().enumerate() {
             let email = config
@@ -450,6 +476,8 @@ fn cmd_init(cli_profile: Option<&str>, resolved_profile: &str) -> Result<()> {
                 eprintln!("  {}) {name} — {email}", i + 1);
             }
         }
+        let add_new_idx = profiles.len() + 1;
+        eprintln!("  {add_new_idx}) + add new account");
         eprintln!();
 
         let choice = prompt(&format!("Profile for this directory [{}]: ", resolved_profile))?;
@@ -458,6 +486,11 @@ fn cmd_init(cli_profile: Option<&str>, resolved_profile: &str) -> Result<()> {
         if choice.is_empty() {
             resolved_profile.to_string()
         } else if let Ok(num) = choice.parse::<usize>() {
+            if num == add_new_idx {
+                // Inline login for a new account, then write workspace config.
+                let saved = cmd_login(cli, config, "", None, true)?;
+                return write_workspace_config(&saved);
+            }
             if num >= 1 && num <= profiles.len() {
                 profiles[num - 1].clone()
             } else {
@@ -472,15 +505,24 @@ fn cmd_init(cli_profile: Option<&str>, resolved_profile: &str) -> Result<()> {
         resolved_profile.to_string()
     };
 
-    // Verify profile exists
-    if config::get_profile(&config, &profile_name).is_none() {
-        bail!(
-            "Profile \"{}\" not found. Run `bisque login --profile {}` first.",
-            profile_name,
-            profile_name,
-        );
+    // If the target profile doesn't exist yet, log in inline.
+    if config::get_profile(config, &profile_name).is_none() {
+        if !is_tty {
+            bail!(
+                "Profile \"{}\" not found. Run `bisque login --profile {}` first.",
+                profile_name,
+                profile_name,
+            );
+        }
+        eprintln!("Profile \"{profile_name}\" doesn't exist yet. Let's log in.\n");
+        let saved = cmd_login(cli, config, &profile_name, None, true)?;
+        return write_workspace_config(&saved);
     }
 
+    write_workspace_config(&profile_name)
+}
+
+fn write_workspace_config(profile_name: &str) -> Result<()> {
     let ws = config::WorkspaceConfig {
         profile: Some(profile_name.to_string()),
     };
