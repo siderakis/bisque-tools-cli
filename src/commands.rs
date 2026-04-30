@@ -766,11 +766,12 @@ fn run_upload_call(
         .and_then(|v| v.as_u64())
         .unwrap_or(8 * 1024 * 1024);
 
-    // Host pattern: prefer what the proxy sent if present (future-proofs
-    // against Drive/Photos/etc. landing on different hosts), otherwise
-    // default to the Google pattern. We rebuild the regex client-side so
-    // the proxy can't smuggle a permissive pattern that bypasses host
-    // validation.
+    // Host pattern comes from the proxy (mirroring the codegen-emitted
+    // tool.upload.hostPattern), so per-provider overrides actually take
+    // effect (Drive vs YouTube vs a future Cloud Storage flow). If the
+    // field is missing, we fall back to the Google default rather than
+    // silently allowing any host. The pattern is compiled client-side
+    // so a compromised proxy can't smuggle a regex that always matches.
     let host_pattern_str = data
         .get("hostPattern")
         .and_then(|v| v.as_str())

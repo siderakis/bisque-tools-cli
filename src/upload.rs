@@ -402,7 +402,25 @@ fn is_retryable_status(code: u16) -> bool {
 }
 
 fn is_transient(err: &ureq::Error) -> bool {
-    matches!(err, ureq::Error::Transport(_))
+    let ureq::Error::Transport(t) = err else {
+        return false;
+    };
+    // Only retry transport errors that could plausibly recover on retry.
+    // DNS-not-found and TLS handshake failures will not change between
+    // attempts; retrying them just wastes time and quota.
+    use ureq::ErrorKind;
+    matches!(
+        t.kind(),
+        ErrorKind::ConnectionFailed
+            | ErrorKind::Io
+            | ErrorKind::ProxyConnect
+            | ErrorKind::Dns // transient NS lookup failures (not NXDOMAIN — see below)
+            | ErrorKind::HTTP
+    )
+    // Note: ureq does not distinguish NXDOMAIN from a transient DNS lookup
+    // failure at the ErrorKind layer. The cost of a few extra DNS retries
+    // is small enough that we accept the false-positive over wrongly
+    // refusing to retry a real transient blip.
 }
 
 fn read_error_body(resp: Response) -> Option<Value> {
