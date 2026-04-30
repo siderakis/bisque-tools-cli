@@ -2,7 +2,7 @@
 
 ## Context
 
-Today, pushing Klaviyo templates requires running a 445-line imperative script (`functions/emails/scripts/push-to-klaviyo.tsx`) with a hand-maintained `TEMPLATES[]` array and a `klaviyo-manifest.json` that conflates remote IDs with project config. Adding or editing a template means three coupled changes, there is no `plan` step, no drift detection, and operational gotchas (template updates don't propagate into flows unless you `--delete-first`) live in tribal knowledge. The L-014 learning in the marketing repo names the core symptom: *copy in repo is not shipped until Klaviyo enabled*.
+Today, pushing Klaviyo templates requires running a 445-line imperative script (`functions/emails/scripts/push-to-klaviyo.tsx`) with a hand-maintained `TEMPLATES[]` array and a `klaviyo-manifest.json` that conflates remote IDs with project config. Adding or editing a template means three coupled changes, there is no `plan` step, no drift detection, and operational gotchas (template updates don't propagate into flows unless you `--delete-first`) live in tribal knowledge. The L-014 learning in the marketing repo names the core symptom: _copy in repo is not shipped until Klaviyo enabled_.
 
 This plan builds a **minimum declarative sync prototype** inside the existing Rust CLI at `apps/bisque-tools-cli`. A user edits a YAML file (or the TSX it points at), runs `bisque-sync plan`, then `bisque-sync apply`. The CLI resolves desired state against a local state DB, renders HTML via an out-of-process command, and drives the existing `bisque call klaviyo_*` backend tools. Success = `bisque-sync import klaviyo templates` produces 37 YAML files, a subsequent `bisque-sync plan` shows 37 NOOPs, editing one TSX shows exactly 1 UPDATE in the next plan, and `bisque-sync apply` pushes it.
 
@@ -270,6 +270,7 @@ Existing `Command::Init` stays untouched. There is no `bisque sync` subcommand �
 **`bisque-sync help <topic>`** — rich in-terminal docs. Topics in prototype: `workflow` (end-to-end walkthrough), `schema` (meta-guide to reading schema output), `troubleshooting` (common errors + codes), `klaviyo` (provider overview), `klaviyo template` (kind overview with an example YAML block). Each topic ends with at least two concrete command examples copy-pasteable as-is.
 
 **Error envelope (every command):**
+
 ```json
 {
   "ok": false,
@@ -280,7 +281,13 @@ Existing `Command::Init` stays untouched. There is no `bisque sync` subcommand �
     "details": {
       "resource": "klaviyo.template.customer_at_risk_reminder",
       "file": "integrations/klaviyo/templates/customer-at-risk-reminder.yaml",
-      "command": ["bun", "functions/emails/scripts/render-one.tsx", "--export", "ReminderEmail", "..."],
+      "command": [
+        "bun",
+        "functions/emails/scripts/render-one.tsx",
+        "--export",
+        "ReminderEmail",
+        "..."
+      ],
       "exit_code": 2,
       "stderr_tail": "ReferenceError: ..."
     }
@@ -400,22 +407,22 @@ For each planned action, in file-name order:
    - Slug = `filenameToKey(name)` analog; fallback to sanitized remote name.
    - Write `integrations/klaviyo/templates/<slug>.yaml`:
      - `name:` from remote attributes.
-     - `html.render: exec` with a placeholder command pointing to the matching TSX export *if* the slug matches an entry in today's manifest; otherwise a comment instructing the user to point at a source.
+     - `html.render: exec` with a placeholder command pointing to the matching TSX export _if_ the slug matches an entry in today's manifest; otherwise a comment instructing the user to point at a source.
    - INSERT state row: `remote_id = remote.id`, `desired_hash = applied_hash = <hash of current render, or null if source unknown>`.
 4. Print summary: `Imported 37 templates, 37 mapped to existing TSX sources, 0 require manual source binding.`
 
-Deliberate: import does *not* try to diff remote HTML against a re-rendered local HTML. The first post-import `bisque-sync plan` will show changes only for templates whose re-render differs from what was last pushed — which is exactly the useful signal (pending work).
+Deliberate: import does _not_ try to diff remote HTML against a re-rendered local HTML. The first post-import `bisque-sync plan` will show changes only for templates whose re-render differs from what was last pushed — which is exactly the useful signal (pending work).
 
 ### Reused utilities (do not re-implement)
 
-| Need | Reuse from |
-|---|---|
-| Auth, profile resolution | `config::require_auth`, `config::resolve_profile_name` (config.rs) |
-| HTTP tool call | `ApiClient::post_tool_call` (api.rs:47) |
-| Response parsing | `ToolCallResponse` enum (api.rs:6) |
-| JSON shape for `klaviyo_update_template` / `klaviyo_create_template` | mirror `superveggie/functions/emails/scripts/push-to-klaviyo.tsx:385-412` |
-| Slug derivation from filename | mirror `superveggie/functions/emails/scripts/lib/manifest.ts::filenameToKey` |
-| Where to read Klaviyo IDs during first import | `superveggie/functions/emails/klaviyo-manifest.json` (read-only) |
+| Need                                                                 | Reuse from                                                                   |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Auth, profile resolution                                             | `config::require_auth`, `config::resolve_profile_name` (config.rs)           |
+| HTTP tool call                                                       | `ApiClient::post_tool_call` (api.rs:47)                                      |
+| Response parsing                                                     | `ToolCallResponse` enum (api.rs:6)                                           |
+| JSON shape for `klaviyo_update_template` / `klaviyo_create_template` | mirror `superveggie/functions/emails/scripts/push-to-klaviyo.tsx:385-412`    |
+| Slug derivation from filename                                        | mirror `superveggie/functions/emails/scripts/lib/manifest.ts::filenameToKey` |
+| Where to read Klaviyo IDs during first import                        | `superveggie/functions/emails/klaviyo-manifest.json` (read-only)             |
 
 ## End-to-end verification
 
@@ -432,7 +439,7 @@ Run in order against the live superveggie workspace (all sync verbs use the `bis
 6. `bisque-sync plan` → expect **0 changes** (or a small number for templates whose TSX has drifted since last push-to-klaviyo).
 7. Edit `functions/emails/src/emails/segments/customer-at-risk/1-reminder.tsx` (change one word).
 8. `bisque-sync plan` → expect exactly **1 UPDATE** for `customer_at_risk_reminder`, with a byte delta in the output.
-9. `bisque-sync apply --dry-run` → prints what it *would* call, does not hit the API.
+9. `bisque-sync apply --dry-run` → prints what it _would_ call, does not hit the API.
 10. `bisque-sync apply` → prompts for confirmation (TTY), calls `klaviyo_update_template`, reports success, updates `applied_hash` in state.db.
 11. Re-run `bisque-sync plan` → expect **0 changes** again.
 12. Revert the edit, `bisque-sync plan` → **1 UPDATE** (reverse direction). Apply it.
@@ -538,7 +545,7 @@ Ordered by when they were made, with the reasoning and — where relevant — wh
 
 7. **State vs. config separation.** Remote IDs go in `.bisque/state.db` (SQLite). Never in YAML, never in git. Workspace YAML stays ID-free so files are portable across environments. Fixes the current `klaviyo-manifest.json` problem of conflating IDs with config.
 
-8. **Metrics: on-demand, not synced.** After evaluation, concluded metrics sync is over-engineered for current use. Live MCP/API pull handles 80% of agent queries. Revisit when a *specific* cross-provider join or historical-preservation query emerges. Managed-state sync has clearer ROI (fixes L-014).
+8. **Metrics: on-demand, not synced.** After evaluation, concluded metrics sync is over-engineered for current use. Live MCP/API pull handles 80% of agent queries. Revisit when a _specific_ cross-provider join or historical-preservation query emerges. Managed-state sync has clearer ROI (fixes L-014).
 
 9. **Local data storage primer (for reference, mostly unused in MVP).** Evaluated SQLite vs DuckDB vs Parquet vs JSONL. Decision for MVP: SQLite only (state DB). Parquet/DuckDB would only matter for metrics sync, which is deferred.
 
@@ -554,16 +561,16 @@ Ordered by when they were made, with the reasoning and — where relevant — wh
 
 ## Rejected alternatives (quick reference)
 
-| Rejected | In favor of | Because |
-|---|---|---|
-| Bidirectional sync | One-way (files → remote, state.db cached back) | Conflict resolution is where bidirectional systems collapse. Drift detection via `refresh` is simpler. |
-| HCL / CUE / Starlark as config format | YAML + JSON Schema | Ecosystem and agent familiarity. CUE is interesting for v2. |
-| Dedicated react-email renderer in Rust | `exec` renderer + workspace script | Framework-agnostic. No Node bundler in Rust. |
-| Terraform-style gRPC provider plugins | Backend tools as providers | Backend already does the SaaS talking; no new plugin runtime to invent. |
-| Separate `apps/bisque-sync/` crate | `argv[0]` multi-call binary | Same mental separation, half the release/install work. |
-| `bisque sync <verb>` namespace | `bisque-sync <verb>` symlink | Cleaner `--help`, cleaner mental model. |
-| Synced metrics store (Parquet + DuckDB) | Live API via existing `bisque call` | ROI not proven; managed state is where the pain is. |
-| Auto-apply on file save | Explicit `plan` → `apply` | Destructive operations need gates. |
+| Rejected                                | In favor of                                    | Because                                                                                                |
+| --------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Bidirectional sync                      | One-way (files → remote, state.db cached back) | Conflict resolution is where bidirectional systems collapse. Drift detection via `refresh` is simpler. |
+| HCL / CUE / Starlark as config format   | YAML + JSON Schema                             | Ecosystem and agent familiarity. CUE is interesting for v2.                                            |
+| Dedicated react-email renderer in Rust  | `exec` renderer + workspace script             | Framework-agnostic. No Node bundler in Rust.                                                           |
+| Terraform-style gRPC provider plugins   | Backend tools as providers                     | Backend already does the SaaS talking; no new plugin runtime to invent.                                |
+| Separate `apps/bisque-sync/` crate      | `argv[0]` multi-call binary                    | Same mental separation, half the release/install work.                                                 |
+| `bisque sync <verb>` namespace          | `bisque-sync <verb>` symlink                   | Cleaner `--help`, cleaner mental model.                                                                |
+| Synced metrics store (Parquet + DuckDB) | Live API via existing `bisque call`            | ROI not proven; managed state is where the pain is.                                                    |
+| Auto-apply on file save                 | Explicit `plan` → `apply`                      | Destructive operations need gates.                                                                     |
 
 ## Target workspace (for prototype)
 
