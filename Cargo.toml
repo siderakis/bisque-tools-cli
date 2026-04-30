@@ -12,10 +12,17 @@ dirs = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 open = "5"
-ureq = "2"
+ureq = { version = "2", features = ["json"] }
 flate2 = "1"
 hostname = "0.4"
 tar = "0.4"
+# Resumable media uploads:
+# - regex: validate session URI host against the provider's allowlist pattern
+# - url: parse and inspect session URIs
+# - httpdate: parse Retry-After when it's an HTTP-date instead of seconds
+regex = "1"
+url = "2"
+httpdate = "1"
 
 [profile.release]
 strip = true

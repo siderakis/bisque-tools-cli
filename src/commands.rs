@@ -1,7 +1,9 @@
 use crate::api::{ApiClient, ToolCallResponse};
 use crate::config::{self, BisqueConfig, BisqueProfile};
+use crate::upload;
 use crate::{AccountsAction, Cli, Command, GENERATED_SKILL_PREFIX};
 use anyhow::{bail, Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -611,7 +613,7 @@ fn cmd_call(
         .map(String::from)
         .unwrap_or_else(read_stdin_if_piped);
 
-    let args: Value = if raw_args.is_empty() {
+    let mut args: Value = if raw_args.is_empty() {
         Value::Object(serde_json::Map::new())
     } else {
         let parsed: Value = serde_json::from_str(&raw_args).context("Invalid JSON for args")?;
@@ -620,6 +622,26 @@ fn cmd_call(
         }
         parsed
     };
+
+    // ── Resumable media upload path ─────────────────────────────────────
+    // If args contain a `mediaPath` string, we are uploading a local file.
+    // Initiate the resumable session via the proxy, then PUT the bytes
+    // directly to Google. See design-docs/mcp-resumable-media-uploads.md.
+    if let Some(media_path) = args
+        .as_object()
+        .and_then(|o| o.get("mediaPath"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+    {
+        return run_upload_call(
+            cli,
+            &client,
+            tool_name,
+            &mut args,
+            &media_path,
+            invocation_id,
+        );
+    }
 
     let mut body = serde_json::json!({
         "toolName": tool_name,
@@ -660,6 +682,121 @@ fn cmd_call(
             }
         }
     }
+    Ok(())
+}
+
+/// Initiate a resumable upload via the proxy, then PUT the file bytes
+/// directly to Google. The proxy returns `{ uploadType, sessionUri,
+/// chunkSize, totalSize, contentType }`; the CLI handles the byte-pump
+/// loop locally so the file never traverses Bisque's hosted infra.
+fn run_upload_call(
+    cli: &Cli,
+    client: &ApiClient,
+    tool_name: &str,
+    args: &mut Value,
+    media_path: &str,
+    invocation_id: Option<&str>,
+) -> Result<()> {
+    let path = Path::new(media_path);
+    if !path.is_absolute() {
+        bail!(
+            "mediaPath must be an absolute path (got {:?}); the upload runs on whichever machine ran `bisque call`",
+            media_path
+        );
+    }
+
+    // Open with O_NOFOLLOW + fstat for size. Closes the stat-then-open
+    // race; this is a correctness fix, not a security gate.
+    let (mut file, meta) = upload::safe_open(path)?;
+    let total_size = meta.len();
+    if total_size == 0 {
+        bail!(
+            "{} is empty; refusing to initiate an upload session for 0 bytes",
+            path.display()
+        );
+    }
+    let content_type = upload::content_type_from_extension(path);
+
+    // Initiate the session via the proxy. The proxy strips mediaPath from
+    // the args before forwarding to Google, so we don't need to remove it
+    // here. (Send the args through verbatim; the proxy sees `mediaPath` as
+    // its trigger that the client is in upload mode.)
+    let mut body = serde_json::json!({
+        "toolName": tool_name,
+        "args": args,
+        "media": {
+            "totalSize": total_size,
+            "contentType": content_type,
+        },
+    });
+    if let Some(id) = invocation_id {
+        body["invocationId"] = Value::String(id.to_string());
+    }
+
+    eprintln!(
+        "→ initiating resumable session for {} ({} bytes, {})",
+        path.display(),
+        total_size,
+        content_type
+    );
+    let init_response = client.post_tool_call("/v1/tool-call", &body)?;
+    let init_json = match init_response {
+        ToolCallResponse::Json(v) => v,
+        ToolCallResponse::Binary { .. } => {
+            bail!("expected JSON session response from /v1/tool-call, got binary")
+        }
+    };
+
+    if init_json.get("status").and_then(|s| s.as_str()) != Some("succeeded") {
+        // Surface the proxy's error verbatim; this is also the path that
+        // fires if the tool has no upload spec, OAuth lacks scope, etc.
+        print_result(&init_json, cli);
+        return Ok(());
+    }
+
+    let data = init_json
+        .get("data")
+        .ok_or_else(|| anyhow::anyhow!("session response missing data field"))?;
+    let session_uri = data
+        .get("sessionUri")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("session response missing sessionUri"))?;
+    let chunk_size = data
+        .get("chunkSize")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8 * 1024 * 1024);
+
+    // Host pattern: prefer what the proxy sent if present (future-proofs
+    // against Drive/Photos/etc. landing on different hosts), otherwise
+    // default to the Google pattern. We rebuild the regex client-side so
+    // the proxy can't smuggle a permissive pattern that bypasses host
+    // validation.
+    let host_pattern_str = data
+        .get("hostPattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or(r"^[a-z0-9-]+\.googleapis\.com$");
+    let host_pattern = Regex::new(host_pattern_str)
+        .with_context(|| format!("invalid host pattern: {}", host_pattern_str))?;
+
+    let outcome = upload::run_upload(
+        &mut file,
+        session_uri,
+        total_size,
+        chunk_size,
+        &host_pattern,
+        media_path,
+        tool_name,
+    )?;
+
+    // Wrap the upstream resource in the standard tool-call response
+    // envelope so downstream consumers (LLM, scripts) get the same shape
+    // they would from a non-upload call.
+    let envelope = serde_json::json!({
+        "status": "succeeded",
+        "data": outcome.resource,
+        "uploadStatus": outcome.status,
+    });
+    print_result(&envelope, cli);
     Ok(())
 }
 

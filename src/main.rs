@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 mod api;
 mod commands;
 mod config;
+mod upload;
 
 pub const DEFAULT_BASE_URL: &str = "https://bisque.tools";
 pub const GENERATED_SKILL_PREFIX: &str = "bisque-";
