@@ -56,7 +56,13 @@ mv "$TMPDIR/bisque" "$INSTALL_DIR/bisque" ||
 chmod +x "$INSTALL_DIR/bisque" ||
   error "Failed to set permissions on bisque executable"
 
+# Install bisque-sync as a symlink to the same binary. main.rs dispatches on
+# argv[0] to switch between the two identities.
+ln -sf bisque "$INSTALL_DIR/bisque-sync" ||
+  error "Failed to create bisque-sync symlink"
+
 echo "Installed bisque to $INSTALL_DIR/bisque"
+echo "Installed bisque-sync -> bisque in $INSTALL_DIR"
 
 # If bisque is already on PATH (reinstall), we're done
 if command -v bisque >/dev/null 2>&1; then

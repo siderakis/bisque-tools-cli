@@ -2,7 +2,9 @@ use clap::{Parser, Subcommand};
 
 mod api;
 mod commands;
+mod commands_sync;
 mod config;
+mod sync;
 mod upload;
 
 pub const DEFAULT_BASE_URL: &str = "https://bisque.tools";
@@ -155,9 +157,124 @@ pub enum AccountsAction {
     },
 }
 
+// ─── bisque-sync identity ─────────────────────────────────────────────
+
+#[derive(Parser)]
+#[command(
+    name = "bisque-sync",
+    version,
+    about = "Bisque Sync — declarative project state for SaaS integrations",
+    disable_help_subcommand = true
+)]
+pub struct SyncCli {
+    #[command(subcommand)]
+    pub command: SyncCommand,
+
+    /// Profile from ~/.bisque/config.json
+    #[arg(long, global = true)]
+    pub profile: Option<String>,
+
+    /// API base URL
+    #[arg(long, global = true)]
+    pub base_url: Option<String>,
+
+    /// User ID (overrides config/env)
+    #[arg(long, global = true)]
+    pub user_id: Option<String>,
+
+    /// API key (overrides config/env)
+    #[arg(long, global = true)]
+    pub api_key: Option<String>,
+
+    /// Emit machine-readable JSON instead of human output
+    #[arg(long, global = true)]
+    pub json: bool,
+}
+
+#[derive(Subcommand)]
+pub enum SyncCommand {
+    /// Scaffold bisque.yaml + .bisque/ + CLAUDE.md stanza in the current directory
+    Init {
+        /// Do not write/append to CLAUDE.md
+        #[arg(long)]
+        no_claude_md: bool,
+    },
+
+    /// Import remote resources into YAML + state.db
+    Import {
+        /// Provider name (e.g. klaviyo)
+        provider: String,
+        /// Resource kind (e.g. templates). Defaults to all kinds the provider supports.
+        kind: Option<String>,
+    },
+
+    /// Show pending changes
+    Plan,
+
+    /// Apply pending changes
+    Apply {
+        /// Print what would be called, skip the actual API calls
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip interactive confirmation (required when stdin is not a TTY)
+        #[arg(long)]
+        auto_approve: bool,
+    },
+
+    /// Render a managed resource (preview output bytes without applying)
+    Render {
+        /// Resource name (e.g. customer_at_risk_reminder)
+        resource: String,
+    },
+
+    /// Print a workspace snapshot (providers, resources, state, pending plan summary)
+    Explain,
+
+    /// List managed resources with current/desired state
+    Ls {
+        /// Filter by provider (e.g. klaviyo)
+        provider: Option<String>,
+        /// Filter by kind (e.g. templates)
+        kind: Option<String>,
+    },
+
+    /// Print the JSON Schema for a resource kind's YAML shape
+    Schema {
+        /// Provider name (e.g. klaviyo)
+        provider: String,
+        /// Resource kind (e.g. template). If omitted, lists available kinds for the provider.
+        kind: Option<String>,
+    },
+
+    /// Verify workspace integrity, auth, render dependencies, known quirks
+    Doctor,
+
+    /// Print a help topic: workflow | schema | troubleshooting | <provider> | <provider> <kind>
+    Help {
+        /// One or two words: the topic, optionally a sub-kind (e.g. `klaviyo template`)
+        topic: Vec<String>,
+    },
+
+    /// RESERVED — MCP server over stdio (returns E_NOT_IMPLEMENTED in prototype)
+    Mcp,
+}
+
 fn main() {
-    let cli = Cli::parse();
-    if let Err(e) = commands::run(cli) {
+    let argv0 = std::env::args().next().unwrap_or_default();
+    let is_sync = std::path::Path::new(&argv0)
+        .file_name()
+        .map(|n| n == "bisque-sync")
+        .unwrap_or(false);
+
+    let result = if is_sync {
+        let cli = SyncCli::parse();
+        commands_sync::run(cli)
+    } else {
+        let cli = Cli::parse();
+        commands::run(cli)
+    };
+
+    if let Err(e) = result {
         eprintln!("{e}");
         std::process::exit(1);
     }

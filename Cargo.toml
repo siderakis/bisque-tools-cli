@@ -23,6 +23,15 @@ tar = "0.4"
 regex = "1"
 url = "2"
 httpdate = "1"
+# Bisque-sync (declarative state for SaaS integrations):
+# - rusqlite: local state.db
+# - serde_yaml: YAML resource files
+# - walkdir: scan integrations/ trees
+# - sha2: hash desired/applied state
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_yaml = "0.9"
+walkdir = "2"
+sha2 = "0.10"
 
 [profile.release]
 strip = true
