@@ -1,5 +1,4 @@
-bisque-sync schema
-==================
+# bisque-sync schema
 
 `bisque-sync schema <provider> [<kind>]` emits the JSON Schema for a
 managed resource's YAML shape. Validate YAML against this schema before
@@ -20,5 +19,5 @@ Examples:
 
 Fields common to all kinds:
 
-  - `kind`: a constant string identifying the resource type.
-  - Resource-specific fields as described in each schema.
+- `kind`: a constant string identifying the resource type.
+- Resource-specific fields as described in each schema.
