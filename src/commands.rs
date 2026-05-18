@@ -93,12 +93,14 @@ pub fn run(cli: Cli) -> Result<()> {
             tool_name,
             args_json,
             invocation_id,
+            skip_schema_check,
         } => cmd_call(
             &cli,
             profile.as_ref(),
             tool_name,
             args_json.as_deref(),
             invocation_id.as_deref(),
+            *skip_schema_check,
         ),
         Command::Sync { agent, skills_dir } => cmd_sync(
             &cli,
@@ -600,6 +602,7 @@ fn cmd_call(
     tool_name: &str,
     args_json: Option<&str>,
     invocation_id: Option<&str>,
+    skip_schema_check: bool,
 ) -> Result<()> {
     let auth = config::require_auth(
         cli.user_id.as_deref(),
@@ -622,6 +625,17 @@ fn cmd_call(
         }
         parsed
     };
+
+    // ── Local schema check ──────────────────────────────────────────────
+    // Catch wrong-arg-name mistakes (e.g. `account_id` vs `adAccountId`)
+    // before they're forwarded to the proxy. Silently no-ops when no local
+    // schema is found, or when --skip-schema-check was passed.
+    if !skip_schema_check {
+        if let Err(msg) = crate::validate::validate_call(tool_name, &args) {
+            eprint!("{msg}");
+            std::process::exit(1);
+        }
+    }
 
     // ── Resumable media upload path ─────────────────────────────────────
     // If args contain a `mediaPath` string, we are uploading a local file.

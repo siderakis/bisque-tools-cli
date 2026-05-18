@@ -6,6 +6,7 @@ mod commands_sync;
 mod config;
 mod sync;
 mod upload;
+mod validate;
 
 pub const DEFAULT_BASE_URL: &str = "https://bisque.tools";
 pub const GENERATED_SKILL_PREFIX: &str = "bisque-";
@@ -66,6 +67,11 @@ pub enum Command {
         /// Request correlation ID
         #[arg(long)]
         invocation_id: Option<String>,
+
+        /// Skip the local JSON Schema check (forward args to the proxy as-is;
+        /// server-side validation still runs)
+        #[arg(long = "skip-schema-check")]
+        skip_schema_check: bool,
     },
 
     /// Sync per-integration skill directories from server
