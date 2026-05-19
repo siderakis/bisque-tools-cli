@@ -910,7 +910,25 @@ fn cmd_sync(
         if changed {
             fs::create_dir_all(&dir_path)?;
             for (filename, content) in &skill.files {
-                fs::write(dir_path.join(filename), content)?;
+                let file_path = dir_path.join(filename);
+                // Remove any existing file/symlink first. fs::write follows
+                // symlinks, so a stale symlink pointing at a deleted target
+                // produces an opaque ENOENT.
+                match fs::symlink_metadata(&file_path) {
+                    Ok(_) => {
+                        fs::remove_file(&file_path).with_context(|| {
+                            format!("Failed to remove existing {}", file_path.display())
+                        })?;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!("Failed to stat {}", file_path.display())
+                        });
+                    }
+                }
+                fs::write(&file_path, content)
+                    .with_context(|| format!("Failed to write {}", file_path.display()))?;
             }
         }
 
